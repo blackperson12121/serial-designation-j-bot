@@ -1,14 +1,15 @@
-const { Client, GatewayIntentBits, Partials } = require('discord.js');
+const DJS = require('discord.js');
 
-const INTENTS = [
-  GatewayIntentBits.Guilds,
-  GatewayIntentBits.GuildMessages,
-  [GatewayIntentBits.Me](https://GatewayIntentBits.Me)ssageContent,
-  GatewayIntentBits.DirectMessages,
-  GatewayIntentBits.GuildMembers,
-];
-
-const client = new Client({ intents: INTENTS, partials: [Partials.Channel] });
+const client = new DJS.Client({
+  intents: [
+    DJS.GatewayIntentBits.Guilds,
+    DJS.GatewayIntentBits.GuildMessages,
+    DJS.GatewayIntentBits.DirectMessages,
+    DJS.GatewayIntentBits.GuildMembers,
+    1 << 15,
+  ],
+  partials: [DJS.Partials.Channel],
+});
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 
@@ -45,9 +46,9 @@ client.on('messageCreate', function(message) {
 
   if (c.startsWith('!kick')) {
     if (!isMod) { ch.send('No permission.'); return; }
-    var m = [message.mentions.me](https://message.mentions.me)mbers.first();
-    if (!m) { ch.send('Usage: !kick @user'); return; }
-    m.kick().then(function() { ch.send('Kicked.'); }).catch(function() { ch.send('Failed.'); });
+    var km = [message.mentions.me](https://message.mentions.me)mbers.first();
+    if (!km) { ch.send('Usage: !kick @user'); return; }
+    km.kick().then(function() { ch.send('Kicked.'); }).catch(function() { ch.send('Failed.'); });
     return;
   }
 
