@@ -1,4 +1,5 @@
 const DJS = require('discord.js');
+const https = require('https');
 
 const client = new DJS.Client({
   intents: [
@@ -12,6 +13,7 @@ const client = new DJS.Client({
 });
 
 var startTime = Date.now();
+var HF_KEY = process.env.HUGGINGFACE_API_KEY;
 
 var roasts = [
   'I would roast you but my parents told me not to burn trash.',
@@ -130,9 +132,55 @@ var memes = [
 function isModerator(msg) {
   var guild = msg.guild;
   if (!guild) return false;
-  var guildMod = guild.members.cache.get(msg.author.id);
-  if (!guildMod) return false;
-  return guildMod.permissions.has('ModerateMembers');
+  var member = guild.members.cache.get(msg.author.id);
+  if (!member) return false;
+  return member.permissions.has('ModerateMembers');
+}
+
+function askHuggingFace(prompt, callback) {
+  var systemPrompt = 'You are Serial Designation J, a sharp, dry, efficient Disassembly Drone from the show Murder Drones by Glitch Productions. You work for JCJenson Corporation. You are competent, direct, slightly cold, and have accidental dry humor. Keep responses concise under 200 words. Never break character.';
+  var fullPrompt = systemPrompt + '\n\nUser: ' + prompt + '\nJ:';
+
+  var body = JSON.stringify({
+    inputs: fullPrompt,
+    parameters: {
+      max_new_tokens: 200,
+      temperature: 0.85,
+      return_full_text: false,
+    },
+  });
+
+  var options = {
+    hostname: 'api-inference.huggingface.co',
+    path: '/models/mistralai/Mistral-7B-Instruct-v0.2',
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': 'Bearer ' + HF_KEY,
+      'Content-Length': Buffer.byteLength(body),
+    },
+  };
+
+  var req = https.request(options, function(res) {
+    var data = '';
+    res.on('data', function(chunk) { data += chunk; });
+    res.on('end', function() {
+      try {
+        var parsed = JSON.parse(data);
+        if (parsed.error) { callback('Model error: ' + parsed.error); return; }
+        var reply = parsed[0] && parsed[0].generated_text;
+        if (!reply) { callback('No response.'); return; }
+        reply = reply.split('J:').pop().trim();
+        callback(null, reply);
+      } catch (e) {
+        callback('Parse error.');
+      }
+    });
+  });
+
+  req.on('error', function(e) { callback('Request failed.'); });
+  req.write(body);
+  req.end();
 }
 
 client.once('ready', function() {
@@ -143,12 +191,12 @@ client.once('ready', function() {
   });
 });
 
-client.on('guildMemberAdd', function(guildMod) {
-  var welcomeChannel = guildMod.guild.channels.cache.find(function(ch) {
+client.on('guildMemberAdd', function(member) {
+  var welcomeChannel = member.guild.channels.cache.find(function(ch) {
     return ch.name === 'general' && ch.isTextBased();
   });
   if (welcomeChannel) {
-    welcomeChannel.send('Welcome to **' + guildMod.guild.name + '**, <@' + guildMod.id + '>. You have been added to the roster.');
+    welcomeChannel.send('Welcome to **' + member.guild.name + '**, <@' + member.id + '>. You have been added to the roster.');
   }
 });
 
@@ -156,6 +204,18 @@ client.on('messageCreate', function(msg) {
   if (msg.author.bot) return;
   var c = msg.content.trim();
   var ch = msg.channel;
+
+  // AI CHAT
+  if (c.startsWith('!j ') || c.startsWith('!ask ')) {
+    var prompt = c.startsWith('!j ') ? c.slice(3).trim() : c.slice(5).trim();
+    if (!prompt) { ch.send('Ask something.'); return; }
+    ch.sendTyping();
+    askHuggingFace(prompt, function(err, reply) {
+      if (err || !reply) { ch.send('I encountered an error. Try again.'); return; }
+      ch.send(reply.slice(0, 2000));
+    });
+    return;
+  }
 
   // UTILITY
   if (c === '!ping') { ch.send('Pong.'); return; }
@@ -221,7 +281,7 @@ client.on('messageCreate', function(msg) {
   if (c.startsWith('!poll')) {
     var pollQ = c.replace('!poll', '').trim();
     if (!pollQ) { ch.send('Usage: !poll [question]'); return; }
-    ch.send('**Poll:** ' + pollQ + '\n\nReact ✅ for Yes or ❌ for No').then(function(pollMsg) {
+    ch.send('**Poll:** ' + pollQ + '\n\nReact with ✅ for Yes or ❌ for No').then(function(pollMsg) {
       pollMsg.react('✅');
       pollMsg.react('❌');
     });
@@ -238,6 +298,14 @@ client.on('messageCreate', function(msg) {
   if (c.startsWith('!compliment')) {
     var cu = msg.mentions.users.first() || msg.author;
     ch.send(cu.username + ' — ' + compliments[Math.floor(Math.random() * compliments.length)]);
+    return;
+  }
+
+  if (c.startsWith('!choose')) {
+    var opts = c.replace('!choose', '').trim().split('|');
+    if (opts.length < 2) { ch.send('Usage: !choose option1 | option2 | option3'); return; }
+    var chosen = opts[Math.floor(Math.random() * opts.length)].trim();
+    ch.send('I choose: **' + chosen + '**');
     return;
   }
 
@@ -274,11 +342,11 @@ client.on('messageCreate', function(msg) {
       { q: 'What year did Minecraft release publicly?', a: '2011' },
       { q: 'What is the max level in most FromSoftware games?', a: '99' },
       { q: 'What company made Valorant?', a: 'Riot Games' },
-      { q: 'How many players start a standard battle royale match in Fortnite?', a: '100' },
-      { q: 'What is the name of the currency in Roblox?', a: 'Robux' },
+      { q: 'How many players start a standard Fortnite match?', a: '100' },
+      { q: 'What is the currency in Roblox?', a: 'Robux' },
     ];
     var t = triviaList[Math.floor(Math.random() * triviaList.length)];
-    ch.send('**Trivia:** ' + t.q + '\n\nType your answer! The correct answer is ||' + t.a + '||');
+    ch.send('**Trivia:** ' + t.q + '\n\nAnswer: ||' + t.a + '||');
     return;
   }
 
@@ -317,7 +385,7 @@ client.on('messageCreate', function(msg) {
 
   if (c === '!winrate') {
     var wr = Math.floor(Math.random() * 101);
-    ch.send(msg.author.username + "'s current winrate: **" + wr + '%**' + (wr < 30 ? ' — touch grass.' : wr > 70 ? ' — suspicious.' : ' — average.'));
+    ch.send(msg.author.username + "'s winrate: **" + wr + '%**' + (wr < 30 ? ' — touch grass.' : wr > 70 ? ' — suspicious.' : ' — average.'));
     return;
   }
 
@@ -366,7 +434,7 @@ client.on('messageCreate', function(msg) {
     return;
   }
 
-  if (c === '!clap') {
+  if (c.startsWith('!clap')) {
     var clapText = c.replace('!clap', '').trim();
     if (!clapText) { ch.send('Usage: !clap your text here'); return; }
     ch.send(clapText.split(' ').join(' 👏 '));
@@ -388,7 +456,7 @@ client.on('messageCreate', function(msg) {
   }
 
   if (c === '!sus') {
-    ch.send(msg.author.username + ' is **' + Math.floor(Math.random() * 101) + '% sus**. 📮');
+    ch.send(msg.author.username + ' is **' + Math.floor(Math.random() * 101) + '% sus** 📮');
     return;
   }
 
@@ -400,7 +468,7 @@ client.on('messageCreate', function(msg) {
 
   if (c === '!iq') {
     var iq = Math.floor(Math.random() * 201);
-    ch.send(msg.author.username + "'s IQ: **" + iq + '**' + (iq < 70 ? ' — this explains a lot.' : iq > 150 ? ' — suspicious. I am running a background check.' : '.'));
+    ch.send(msg.author.username + "'s IQ: **" + iq + '**' + (iq < 70 ? ' — this explains a lot.' : iq > 150 ? ' — suspicious. Running a background check.' : '.'));
     return;
   }
 
@@ -416,18 +484,11 @@ client.on('messageCreate', function(msg) {
     return;
   }
 
-  if (c.startsWith('!choose')) {
-    var options = c.replace('!choose', '').trim().split('|');
-    if (options.length < 2) { ch.send('Usage: !choose option1 | option2 | option3'); return; }
-    var chosen = options[Math.floor(Math.random() * options.length)].trim();
-    ch.send('I choose: **' + chosen + '**');
-    return;
-  }
-
   // HELP
   if (c === '!help') {
     ch.send(
       '**Serial Designation J — Command List**\n\n' +
+      '**AI:** `!j [message]` or `!ask [message]` — Talk to J directly\n' +
       '**Utility:** !ping !uptime !info !rules !servericon !avatar !say !poll !choose\n' +
       '**Fun:** !8ball !roll !coinflip !roast !compliment !rate !iq !vibecheck !sus !pp !howgay !clap !ship\n' +
       '**Gaming:** !game !rps !trivia !rank !loadout !winrate !wouldyourather !nhi !dare !truth\n' +
@@ -443,8 +504,8 @@ client.on('messageCreate', function(msg) {
     if (!isModerator(msg)) { ch.send('No permission.'); return; }
     var wu = msg.mentions.users.first();
     if (!wu) { ch.send('Usage: !warn @user reason'); return; }
-    var wr = c.replace('!warn', '').replace('<@' + wu.id + '>', '').trim();
-    ch.send('Warning issued to **' + wu.username + '**' + (wr ? ' — ' + wr : ''));
+    var warnReason = c.replace('!warn', '').replace('<@' + wu.id + '>', '').trim();
+    ch.send('Warning issued to **' + wu.username + '**' + (warnReason ? ' — ' + warnReason : ''));
     return;
   }
 
