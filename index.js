@@ -137,16 +137,17 @@ function isModerator(msg) {
   return member.permissions.has('ModerateMembers');
 }
 
-function askHuggingFace(prompt, callback) {
-  var systemPrompt = 'You are Serial Designation J, a sharp, dry, efficient Disassembly Drone from the show Murder Drones by Glitch Productions. You work for JCJenson Corporation. You are competent, direct, slightly cold, and have accidental dry humor. Keep responses concise under 200 words. Never break character.';
-  var fullPrompt = systemPrompt + '\n\nUser: ' + prompt + '\nJ:';
+function hfRequest(prompt, attempt, callback) {
+  var systemPrompt = 'You are Serial Designation J, a sharp, dry, efficient Disassembly Drone from Murder Drones by Glitch Productions. You work for JCJenson Corporation. You are competent, direct, slightly cold, with accidental dry humor. Keep responses under 150 words. Never break character. Do not explain who you are unless asked.';
+  var fullPrompt = '<s>[INST] ' + systemPrompt + '\n\n' + prompt + ' [/INST]';
 
   var body = JSON.stringify({
     inputs: fullPrompt,
     parameters: {
       max_new_tokens: 200,
-      temperature: 0.85,
+      temperature: 0.8,
       return_full_text: false,
+      stop: ['</s>', '[INST]'],
     },
   });
 
@@ -167,18 +168,27 @@ function askHuggingFace(prompt, callback) {
     res.on('end', function() {
       try {
         var parsed = JSON.parse(data);
-        if (parsed.error) { callback('Model error: ' + parsed.error); return; }
+
+        // Model still loading — retry once after delay
+        if (parsed.error && parsed.error.toLowerCase().includes('loading') && attempt < 2) {
+          console.log('Model loading, retrying in 20s...');
+          setTimeout(function() { hfRequest(prompt, attempt + 1, callback); }, 20000);
+          return;
+        }
+
+        if (parsed.error) { callback('HF error: ' + parsed.error); return; }
+
         var reply = parsed[0] && parsed[0].generated_text;
-        if (!reply) { callback('No response.'); return; }
-        reply = reply.split('J:').pop().trim();
+        if (!reply) { callback('Empty response.'); return; }
+        reply = reply.trim();
         callback(null, reply);
       } catch (e) {
-        callback('Parse error.');
+        callback('Parse error: ' + e.message + ' | raw: ' + data.slice(0, 200));
       }
     });
   });
 
-  req.on('error', function(e) { callback('Request failed.'); });
+  req.on('error', function(e) { callback('Network error: ' + e.message); });
   req.write(body);
   req.end();
 }
@@ -210,8 +220,12 @@ client.on('messageCreate', function(msg) {
     var prompt = c.startsWith('!j ') ? c.slice(3).trim() : c.slice(5).trim();
     if (!prompt) { ch.send('Ask something.'); return; }
     ch.sendTyping();
-    askHuggingFace(prompt, function(err, reply) {
-      if (err || !reply) { ch.send('I encountered an error. Try again.'); return; }
+    hfRequest(prompt, 1, function(err, reply) {
+      if (err) {
+        console.log('AI error:', err);
+        ch.send('Systems temporarily unavailable. Try again in a moment.');
+        return;
+      }
       ch.send(reply.slice(0, 2000));
     });
     return;
