@@ -636,6 +636,20 @@ client.on('messageCreate', function(msg) {
     bm.ban().then(function() { ch.send('Banned.'); }).catch(function() { ch.send('Failed.'); });
     return;
   }
+  // ── RANDOM RESPONSE (70% chance) ──
+  if (!c.startsWith('!') && Math.random() < 0.70) {
+    ch.sendTyping();
+    getMemory(msg.author.id, function(err, mem) {
+      mem.username = msg.author.username;
+      askCloudflare(msg.content, mem, function(aiErr, reply) {
+        if (aiErr) return;
+        ch.send(reply.slice(0, 2000));
+        var updated = updateMemoryFromReply(mem, msg.content, reply);
+        upsertMemory(updated);
+      });
+    });
+    return;
+  }
 });
 
 client.login(process.env.BOT_TOKEN);
