@@ -16,9 +16,9 @@ var startTime = Date.now();
 var shutUpUntil = 0; // timestamp until J is silenced
 
 // ── ACCESS CONTROL ────────────────────────────────────────────────────────────
-var OWNER_USERNAME = 'serialdesignationjxz';
+var OWNER_ID = '1326338080696832010'; // serialdesignationjxz
 var HOME_GUILD_ID = null; // set on ready
-var authorizedUsers = new Set(); // usernames authorized by owner to use !j
+var authorizedUsers = new Set(); // user IDs authorized by owner to use !j
 var CF_ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID;
 var CF_API_TOKEN = process.env.CLOUDFLARE_API_TOKEN;
 var SUPABASE_URL = process.env.SUPABASE_URL;
@@ -332,24 +332,28 @@ client.on('messageCreate', function(msg) {
   // ── SERVER LOCK: ignore messages from non-home guilds ──
   if (msg.guild && HOME_GUILD_ID && msg.guild.id !== HOME_GUILD_ID) return;
 
-  var isOwner = msg.author.username.toLowerCase() === OWNER_USERNAME.toLowerCase();
+  var isOwner = msg.author.id === OWNER_ID;
 
   // ── ?Authorize command (owner only) ──
   if (c.toLowerCase().startsWith('?authorize ')) {
     if (!isOwner) { ch.send('That command is above your clearance level.'); return; }
-    var targetName = c.slice(11).trim().toLowerCase();
-    if (!targetName) { ch.send('Usage: ?Authorize username'); return; }
-    authorizedUsers.add(targetName);
-    ch.send('**' + targetName + '** has been granted access to J. Do not make me regret this.');
+    var mentionedUser = msg.mentions.users.first();
+    var targetId = mentionedUser ? mentionedUser.id : c.slice(11).trim();
+    var targetLabel = mentionedUser ? mentionedUser.username : targetId;
+    if (!targetId) { ch.send('Usage: ?Authorize @user or ?Authorize userID'); return; }
+    authorizedUsers.add(targetId);
+    ch.send('**' + targetLabel + '** has been granted access to J. Do not make me regret this.');
     return;
   }
 
   // ── ?Revoke command (owner only) ──
   if (c.toLowerCase().startsWith('?revoke ')) {
     if (!isOwner) { ch.send('No.'); return; }
-    var revokeName = c.slice(8).trim().toLowerCase();
-    authorizedUsers.delete(revokeName);
-    ch.send('Access revoked for **' + revokeName + '**. As it should be.');
+    var revokeUser = msg.mentions.users.first();
+    var revokeId = revokeUser ? revokeUser.id : c.slice(8).trim();
+    var revokeLabel = revokeUser ? revokeUser.username : revokeId;
+    authorizedUsers.delete(revokeId);
+    ch.send('Access revoked for **' + revokeLabel + '**. As it should be.');
     return;
   }
 
@@ -362,7 +366,7 @@ client.on('messageCreate', function(msg) {
   }
 
   // ── J ACCESS GATE: only owner + authorized users can trigger J ──
-  var canUseJ = isOwner || authorizedUsers.has(msg.author.username.toLowerCase());
+  var canUseJ = isOwner || authorizedUsers.has(msg.author.id);
 
   // ── COMMAND GATE: block all ! commands for unauthorized users ──
   if (c.startsWith('!') && !canUseJ) {
