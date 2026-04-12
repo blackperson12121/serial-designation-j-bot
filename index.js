@@ -21,6 +21,11 @@ var SUPABASE_KEY = process.env.SUPABASE_KEY;
 // ── SUPABASE HELPERS ──────────────────────────────────────────────────────────
 
 function supabaseRequest(method, path, body, callback) {
+  if (!SUPABASE_URL || !SUPABASE_KEY) {
+    console.error('[SUPABASE] Missing SUPABASE_URL or SUPABASE_KEY env vars');
+    callback('Missing Supabase config');
+    return;
+  }
   var url = new URL(SUPABASE_URL + path);
   var bodyStr = body ? JSON.stringify(body) : null;
   var options = {
@@ -31,7 +36,7 @@ function supabaseRequest(method, path, body, callback) {
       'apikey': SUPABASE_KEY,
       'Authorization': 'Bearer ' + SUPABASE_KEY,
       'Content-Type': 'application/json',
-      'Prefer': method === 'POST' ? 'return=representation' : '',
+      'Prefer': method === 'POST' ? 'return=representation,resolution=merge-duplicates' : '',
     },
   };
   if (bodyStr) options.headers['Content-Length'] = Buffer.byteLength(bodyStr);
@@ -40,11 +45,15 @@ function supabaseRequest(method, path, body, callback) {
     var data = '';
     res.on('data', function(c) { data += c; });
     res.on('end', function() {
+      console.log('[SUPABASE] ' + method + ' ' + path + ' -> HTTP ' + res.statusCode + ' | ' + data.slice(0, 200));
       try { callback(null, JSON.parse(data || '[]')); }
       catch (e) { callback(null, []); }
     });
   });
-  req.on('error', function(e) { callback(e.message); });
+  req.on('error', function(e) {
+    console.error('[SUPABASE] Request error:', e.message);
+    callback(e.message);
+  });
   if (bodyStr) req.write(bodyStr);
   req.end();
 }
@@ -61,7 +70,7 @@ function getMemory(userId, callback) {
 
 function upsertMemory(mem, callback) {
   mem.last_seen = new Date().toISOString();
-  supabaseRequest('POST', '/rest/v1/user_memory?on_conflict=user_id', mem, function(err) {
+  supabaseRequest('POST', '/rest/v1/user_memory?on_conflict=user_id&ignore_duplicates=false', mem, function(err) {
     if (callback) callback(err);
   });
 }
