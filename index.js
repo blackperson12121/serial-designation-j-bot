@@ -13,6 +13,7 @@ const client = new DJS.Client({
 });
 
 var startTime = Date.now();
+var shutUpUntil = 0; // timestamp until J is silenced
 var CF_ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID;
 var CF_API_TOKEN = process.env.CLOUDFLARE_API_TOKEN;
 var SUPABASE_URL = process.env.SUPABASE_URL;
@@ -322,6 +323,7 @@ client.on('messageCreate', function(msg) {
   if (c.startsWith('!j ') || c.startsWith('!ask ')) {
     var prompt = c.startsWith('!j ') ? c.slice(3).trim() : c.slice(5).trim();
     if (!prompt) { ch.send('Ask something.'); return; }
+    if (Date.now() < shutUpUntil) { var remaining = Math.ceil((shutUpUntil - Date.now()) / 60000); ch.send('I have ' + remaining + ' minute(s) left of silence. Do not test me.'); return; }
     ch.sendTyping();
 
     getMemory(msg.author.id, function(err, mem) {
@@ -645,8 +647,24 @@ client.on('messageCreate', function(msg) {
     bm.ban().then(function() { ch.send('Banned.'); }).catch(function() { ch.send('Failed.'); });
     return;
   }
+  // ── SHUT UP COMMAND ──
+  if (c.toLowerCase().startsWith('!shutup') || c.toLowerCase().startsWith('!shut up')) {
+    var mins = parseInt(c.split(' ').pop());
+    if (!mins || isNaN(mins) || mins < 1) { ch.send('Usage: !shutup 10 (minutes)'); return; }
+    shutUpUntil = Date.now() + (mins * 60 * 1000);
+    ch.send('Fine. ' + mins + ' minutes. Don\'t make it weird.');
+    return;
+  }
+
+  // ── UNSHUT ──
+  if (c.toLowerCase() === '!unshut' || c.toLowerCase() === '!jspeak') {
+    shutUpUntil = 0;
+    ch.send('Back. Try not to need me this much.');
+    return;
+  }
+
   // ── RANDOM RESPONSE (70% chance) ──
-  if (!c.startsWith('!') && Math.random() < 0.70) {
+  if (!c.startsWith('!') && Math.random() < 0.70 && Date.now() > shutUpUntil) {
     ch.sendTyping();
     getMemory(msg.author.id, function(err, mem) {
       mem.username = msg.author.username;
