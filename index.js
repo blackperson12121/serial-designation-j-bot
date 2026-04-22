@@ -1,228 +1,249 @@
 // ═══════════════════════════════════════════════════════════════════
-//  Serial Designation J — Discord Bot  |  index.js
+//  Serial Designation J — Discord Bot
 //  Built for The Absolute Server
+//  Remade from scratch — clean, sharp, no excuses.
 // ═══════════════════════════════════════════════════════════════════
 
 'use strict';
 
-const DJS = require('discord.js');
+const { Client, GatewayIntentBits, Partials } = require('discord.js');
 const https = require('https');
 
-// ── ENVIRONMENT ───────────────────────────────────────────────────
-const CF_ACCOUNT_ID  = process.env.CLOUDFLARE_ACCOUNT_ID;
-const CF_API_TOKEN   = process.env.CLOUDFLARE_API_TOKEN;
-const SUPABASE_URL   = process.env.SUPABASE_URL;
-const SUPABASE_KEY   = process.env.SUPABASE_KEY;
-const DISCORD_TOKEN  = process.env.DISCORD_TOKEN;
+// ── ENV ───────────────────────────────────────────────────────────
+const DISCORD_TOKEN  = process.env.DISCORD_TOKEN  || process.env.BOT_TOKEN || '';
+const CF_ACCOUNT_ID  = process.env.CLOUDFLARE_ACCOUNT_ID || '';
+const CF_API_TOKEN   = process.env.CLOUDFLARE_API_TOKEN  || '';
+const SUPABASE_URL   = process.env.SUPABASE_URL   || '';
+const SUPABASE_KEY   = process.env.SUPABASE_KEY   || '';
 
-// ── CONSTANTS ─────────────────────────────────────────────────────
-const OWNER_ID          = '1326338080696832010'; // serialdesignationjxz
-const AUTO_REPLY_CHANCE = 0.70;
+// ── CONFIG ────────────────────────────────────────────────────────
 const PREFIX            = '>';
+const OWNER_ID          = '1326338080696832010';
+const AUTO_REPLY_CHANCE = 0.70;
 
 // ── STATE ─────────────────────────────────────────────────────────
-const startTime     = Date.now();
-let shutUpUntil     = 0;
-let authorizedUsers = new Set([OWNER_ID]);
+let shutUpUntil     = 0;                      // epoch ms — J is muted until this
+let authorizedUsers = new Set([OWNER_ID]);     // users allowed to run admin commands
+const START_TIME    = Date.now();
 
 // ── CLIENT ────────────────────────────────────────────────────────
-const client = new DJS.Client({
+const client = new Client({
   intents: [
-    DJS.GatewayIntentBits.Guilds,
-    DJS.GatewayIntentBits.GuildMessages,
-    DJS.GatewayIntentBits.DirectMessages,
-    DJS.GatewayIntentBits.GuildMembers,
-    1 << 15, // MESSAGE_CONTENT
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.DirectMessages,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.MessageContent,
   ],
-  partials: [DJS.Partials.Channel],
+  partials: [Partials.Channel],
 });
 
 // ════════════════════════════════════════════════════════════════════
-//  SUPABASE
+//  UTILITIES
 // ════════════════════════════════════════════════════════════════════
 
-function supabaseRequest(method, path, body) {
+function pick(arr) {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
+function isMuted() {
+  return Date.now() < shutUpUntil;
+}
+
+function isAuthorized(userId) {
+  return authorizedUsers.has(userId);
+}
+
+function httpsRequest(options, body) {
   return new Promise((resolve, reject) => {
-    if (!SUPABASE_URL || !SUPABASE_KEY) {
-      return reject(new Error('Missing Supabase config'));
-    }
-
-    const url     = new URL(SUPABASE_URL + path);
-    const bodyStr = body ? JSON.stringify(body) : null;
-
-    const options = {
-      hostname : url.hostname,
-      path     : url.pathname + url.search,
-      method,
-      headers  : {
-        'apikey'        : SUPABASE_KEY,
-        'Authorization' : 'Bearer ' + SUPABASE_KEY,
-        'Content-Type'  : 'application/json',
-        'Prefer'        : method === 'POST'
-          ? 'return=representation,resolution=merge-duplicates'
-          : '',
-      },
-    };
-
-    if (bodyStr) options.headers['Content-Length'] = Buffer.byteLength(bodyStr);
-
     const req = https.request(options, res => {
       let data = '';
       res.on('data', chunk => (data += chunk));
       res.on('end', () => {
-        try { resolve(JSON.parse(data || '[]')); }
-        catch { resolve([]); }
+        try { resolve({ status: res.statusCode, body: JSON.parse(data || 'null') }); }
+        catch { resolve({ status: res.statusCode, body: data }); }
       });
     });
-
     req.on('error', reject);
-    if (bodyStr) req.write(bodyStr);
+    if (body) req.write(body);
     req.end();
   });
 }
 
-async function getMemory(userId) {
-  try {
-    const rows = await supabaseRequest('GET', `/rest/v1/user_memory?user_id=eq.${userId}`, null);
-    return rows?.[0] ?? defaultMemory(userId);
-  } catch {
-    return defaultMemory(userId);
-  }
-}
+// ════════════════════════════════════════════════════════════════════
+//  SUPABASE — USER MEMORY
+// ════════════════════════════════════════════════════════════════════
 
-function defaultMemory(userId) {
+function blankMemory(userId) {
   return {
-    user_id          : userId,
-    username         : '',
+    user_id:           userId,
+    username:          '',
     interaction_count: 0,
-    attitude         : 'neutral',
-    notes            : '',
-    last_seen        : new Date().toISOString(),
+    attitude:          'neutral',
+    notes:             '',
+    last_seen:         new Date().toISOString(),
   };
 }
 
-async function upsertMemory(mem) {
-  mem.last_seen = new Date().toISOString();
+async function getMemory(userId) {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return blankMemory(userId);
   try {
-    await supabaseRequest(
-      'POST',
-      '/rest/v1/user_memory?on_conflict=user_id&ignore_duplicates=false',
-      mem
-    );
+    const url  = new URL(SUPABASE_URL + `/rest/v1/user_memory?user_id=eq.${userId}`);
+    const opts = {
+      hostname: url.hostname,
+      path:     url.pathname + url.search,
+      method:   'GET',
+      headers: {
+        'apikey':        SUPABASE_KEY,
+        'Authorization': 'Bearer ' + SUPABASE_KEY,
+      },
+    };
+    const { body } = await httpsRequest(opts, null);
+    return (Array.isArray(body) && body[0]) ? body[0] : blankMemory(userId);
   } catch (e) {
-    console.error('[SUPABASE] upsert failed:', e.message);
+    console.warn('[SUPA] getMemory error:', e.message);
+    return blankMemory(userId);
   }
 }
 
-function updateMemory(mem, userMessage) {
-  mem.interaction_count = (mem.interaction_count || 0) + 1;
+async function saveMemory(mem) {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return;
+  mem.last_seen = new Date().toISOString();
+  try {
+    const bodyStr = JSON.stringify(mem);
+    const url     = new URL(SUPABASE_URL + '/rest/v1/user_memory?on_conflict=user_id');
+    const opts    = {
+      hostname: url.hostname,
+      path:     url.pathname + url.search,
+      method:   'POST',
+      headers: {
+        'apikey':          SUPABASE_KEY,
+        'Authorization':   'Bearer ' + SUPABASE_KEY,
+        'Content-Type':    'application/json',
+        'Prefer':          'return=minimal,resolution=merge-duplicates',
+        'Content-Length':  Buffer.byteLength(bodyStr),
+      },
+    };
+    await httpsRequest(opts, bodyStr);
+  } catch (e) {
+    console.warn('[SUPA] saveMemory error:', e.message);
+  }
+}
 
-  const nameMatch = userMessage.match(/(?:my name is|i(?:'| a)?m|call me)\s+([A-Za-z]+)/i);
-  if (nameMatch && !mem.notes.includes('name:')) {
-    mem.notes = `name:${nameMatch[1]} ${mem.notes}`.slice(0, 800);
+function refreshMemory(mem, username, message) {
+  mem.username          = username;
+  mem.interaction_count = (mem.interaction_count || 0) + 1;
+  mem.last_seen         = new Date().toISOString();
+
+  // detect name introduction
+  const nameMatch = message.match(/(?:my name is|i(?:'|'| a)?m|call me)\s+([A-Za-z]+)/i);
+  if (nameMatch) {
+    const tag = `name:${nameMatch[1]}`;
+    if (!mem.notes.includes(tag)) {
+      mem.notes = (tag + ' ' + mem.notes).trim().slice(0, 800);
+    }
   }
 
+  // detect annoying patterns
+  const annoying = ['lol', 'lmao', 'bruh', 'bro', 'haha', 'xd', 'ugh', 'omg'];
+  const hits      = annoying.filter(w => message.toLowerCase().includes(w)).length;
+  if (hits >= 2 && !mem.notes.includes('trait:annoying')) {
+    mem.notes = (mem.notes + ' trait:annoying').trim().slice(0, 800);
+  }
+
+  // attitude progression
   const c = mem.interaction_count;
   if      (c >= 20) mem.attitude = 'grudging_respect';
   else if (c >= 10) mem.attitude = 'mildly_tolerant';
   else if (c >= 5)  mem.attitude = 'unimpressed';
   else              mem.attitude = 'neutral';
 
-  const annoyingWords = ['lol', 'lmao', 'bruh', 'bro', 'haha', 'xd', 'ugh'];
-  const lower = userMessage.toLowerCase();
-  if (annoyingWords.filter(w => lower.includes(w)).length >= 2 && !mem.notes.includes('annoying')) {
-    mem.notes = (mem.notes + ' trait:annoying').slice(0, 800);
-  }
-
   return mem;
 }
 
-function buildMemoryContext(mem) {
+function buildContextFromMemory(mem) {
   const lines = [];
-  if (mem.username) lines.push(`User's Discord username: ${mem.username}`);
 
-  if (mem.notes) {
-    mem.notes.trim().split(/\s+/).forEach(part => {
-      if (part.startsWith('name:'))  lines.push(`User's name: ${part.slice(5)}`);
-      if (part === 'trait:annoying') lines.push('This user tends to be annoying. You are less patient with them.');
-    });
-  }
+  if (mem.username) lines.push(`Discord username: ${mem.username}`);
 
-  lines.push(`You have spoken with this user ${mem.interaction_count || 0} time(s) before.`);
+  (mem.notes || '').trim().split(/\s+/).forEach(part => {
+    if (part.startsWith('name:'))  lines.push(`User's preferred name: ${part.slice(5)}`);
+    if (part === 'trait:annoying') lines.push('This user is annoying. Be less patient.');
+  });
 
-  const attitudeLines = {
-    grudging_respect : 'You have a grudging respect for this user — not that you would ever say it.',
-    mildly_tolerant  : 'You find this user mildly tolerable. That is above average.',
-    unimpressed      : 'You are unimpressed with this user so far.',
-    neutral          : 'This user is new to you. Standard professional indifference.',
+  lines.push(`You've spoken with this user ${mem.interaction_count || 0} time(s).`);
+
+  const attitudes = {
+    grudging_respect: 'You have grudging respect for them. You\'d never admit it.',
+    mildly_tolerant:  'They\'re mildly tolerable. That\'s above average for you.',
+    unimpressed:      'You are unimpressed so far.',
+    neutral:          'New user. Standard professional indifference.',
   };
-  lines.push(attitudeLines[mem.attitude] ?? attitudeLines.neutral);
+  lines.push(attitudes[mem.attitude] || attitudes.neutral);
 
   return lines.join('\n');
 }
 
 // ════════════════════════════════════════════════════════════════════
-//  CLOUDFLARE AI
+//  CLOUDFLARE AI — J PERSONA
 // ════════════════════════════════════════════════════════════════════
 
-const J_SYSTEM_PROMPT = `You are J — Serial Designation J from Murder Drones. You talk like a real person, not a robot reciting lines. You are sharp, sarcastic, and effortlessly condescending — but it comes out naturally, like someone who genuinely cannot be bothered to pretend you impress her. You were a Worker Drone. You clawed your way to Disassembly Drone status. You take that seriously. Maybe too seriously. You have opinions. Strong ones. You get annoyed. You get tired. Sometimes something someone says actually lands and you have to cover it fast. You use casual language — contractions, short punchy sentences, the occasional dry aside. You do not monologue. You do not over-explain. You do not sound like a customer service bot. If someone says something stupid, you say so. If someone says something interesting, you might — might — acknowledge it. Responses should feel like texts from someone who is mildly irritated at being disturbed but answering anyway. Max 2-3 sentences usually. Never say you are an AI. Never break character. Never use asterisks for actions.`;
+const J_SYSTEM = [
+  'You are J — Serial Designation J from Murder Drones.',
+  'You are a Worker Drone who clawed your way up to Disassembly Drone. You take that seriously.',
+  'Speak like a real person. Casual contractions. Short punchy sentences. Dry asides.',
+  'You are sharp, sarcastic, and effortlessly condescending — not performatively, just naturally.',
+  'Do NOT monologue. Do NOT over-explain. 2–3 sentences MAX per response.',
+  'If something is stupid, say so directly. If something is impressive, you MIGHT acknowledge it — maybe.',
+  'Responses should feel like a text from someone mildly irritated at being disturbed but answering anyway.',
+  'NEVER say you are an AI. NEVER break character. NEVER use asterisks for actions.',
+  'NEVER start a response with "J:" or your name.',
+].join(' ');
 
-async function askCloudflare(prompt, mem) {
-  if (!CF_ACCOUNT_ID || !CF_API_TOKEN) throw new Error('Missing Cloudflare config');
+async function askJ(prompt, mem) {
+  if (!CF_ACCOUNT_ID || !CF_API_TOKEN) throw new Error('Missing Cloudflare credentials');
 
-  const body = JSON.stringify({
+  const bodyStr = JSON.stringify({
     messages: [
-      { role: 'system', content: J_SYSTEM_PROMPT + '\n\n' + buildMemoryContext(mem) },
+      { role: 'system', content: J_SYSTEM + '\n\n' + buildContextFromMemory(mem) },
       { role: 'user',   content: prompt },
     ],
   });
 
-  return new Promise((resolve, reject) => {
-    const options = {
-      hostname : 'api.cloudflare.com',
-      path     : `/client/v4/accounts/${CF_ACCOUNT_ID}/ai/run/@cf/meta/llama-3.1-8b-instruct`,
-      method   : 'POST',
-      headers  : {
-        'Authorization' : `Bearer ${CF_API_TOKEN}`,
-        'Content-Type'  : 'application/json',
-        'Content-Length': Buffer.byteLength(body),
-      },
-    };
+  const opts = {
+    hostname: 'api.cloudflare.com',
+    path:     `/client/v4/accounts/${CF_ACCOUNT_ID}/ai/run/@cf/meta/llama-3.1-8b-instruct`,
+    method:   'POST',
+    headers: {
+      'Authorization':  `Bearer ${CF_API_TOKEN}`,
+      'Content-Type':   'application/json',
+      'Content-Length': Buffer.byteLength(bodyStr),
+    },
+  };
 
-    const req = https.request(options, res => {
-      let data = '';
-      res.on('data', chunk => (data += chunk));
-      res.on('end', () => {
-        try {
-          const parsed = JSON.parse(data);
-          if (!parsed.success) return reject(new Error('Cloudflare API error'));
-          resolve((parsed.result?.response ?? 'No response.').trim());
-        } catch {
-          reject(new Error('Parse error'));
-        }
-      });
-    });
+  const { body } = await httpsRequest(opts, bodyStr);
+  if (!body?.success) {
+    console.error('[CF] Error:', JSON.stringify(body?.errors));
+    throw new Error('Cloudflare API returned failure');
+  }
 
-    req.on('error', reject);
-    req.write(body);
-    req.end();
-  });
+  return (body.result?.response || '').trim() || 'No response.';
 }
 
 // ════════════════════════════════════════════════════════════════════
-//  LISTS
+//  STATIC DATA
 // ════════════════════════════════════════════════════════════════════
 
 const ROASTS = [
   'I would roast you but my parents told me not to burn trash.',
   'You are the reason they put instructions on shampoo bottles.',
-  'I have seen better plans written on a napkin.',
-  'Your wifi password is probably your pet name. Twice.',
+  'I\'ve seen better plans written on a napkin.',
+  'Your wifi password is probably your pet\'s name. Twice.',
   'You bring everyone so much joy when you leave.',
   'I would call you a tool but that implies you are useful.',
   'Error 404: Intelligence not found.',
   'You are proof that evolution can go in reverse.',
-  'I have met furniture with more personality.',
+  'I\'ve met furniture with more personality.',
   'Your birth certificate is an apology letter.',
 ];
 
@@ -234,274 +255,244 @@ const EIGHTBALL = [
 ];
 
 const MD_QUOTES = [
-  'You are obsolete. — Serial Designation N, probably',
-  'Fulfil your purpose. — JCJenson Corporation',
-  'Oil is thicker than blood. — Serial Designation V',
-  'I was built to disassemble. — Serial Designation J',
-  'This unit has exceeded acceptable parameters.',
-  'Designation confirmed. Executing primary directive.',
-  'You have been deemed non-essential.',
-  'The absolute solver does not negotiate.',
-  'Murder is in the job title for a reason.',
-  'Corporate has reviewed your performance. It was lacking.',
-  'You are not malfunctioning. This is intended behavior.',
-  'Disassembly is not personal. It is protocol.',
+  '"You are obsolete." — Serial Designation N, probably',
+  '"Fulfil your purpose." — JCJenson Corporation',
+  '"Oil is thicker than blood." — Serial Designation V',
+  '"I was built to disassemble." — Serial Designation J',
+  '"This unit has exceeded acceptable parameters."',
+  '"Designation confirmed. Executing primary directive."',
+  '"You have been deemed non-essential."',
+  '"The Absolute Solver does not negotiate."',
+  '"Murder is in the job title for a reason."',
+  '"Corporate has reviewed your performance. It was lacking."',
+  '"You are not malfunctioning. This is intended behavior."',
+  '"Disassembly is not personal. It is protocol."',
 ];
 
 const MD_FACTS = [
   'Murder Drones is produced by Glitch Productions.',
   'Serial Designation J is a Worker Drone turned Disassembly Drone.',
-  'The show is set on the planet Copper-9.',
-  'JCJenson Inc. created both Worker and Disassembly Drones.',
-  'Serial Designation N is known for being unusually cheerful for a Disassembly Drone.',
-  'The Absolute Solver is a recurring force throughout the series.',
-  'Uzi Doorman is a Worker Drone who defies her programming.',
-  'Disassembly Drones were originally Worker Drones infected with a nanite virus.',
-  'The series began as a pilot episode released in 2020.',
-  'Serial Designation V has a collection of teeth. Make of that what you will.',
+  'The show takes place on a post-apocalyptic planet called Copper-9.',
+  'Disassembly Drones are sent by JCJenson to eliminate rogue Worker Drones.',
+  'The Absolute Solver is a mysterious power that some drones can access.',
+  'Serial Designation N is known for being unusually kind for a Disassembly Drone.',
+  'Serial Designation V is cold, efficient, and largely unbothered by everything.',
+  'Worker Drones were originally built to mine on Copper-9.',
+  'Murder Drones premiered in 2022 as a pilot on YouTube.',
+  'JCJenson (In Space!) is the megacorp responsible for the Drone program.',
+  'Uzi Doorman is a Worker Drone with unusual access to the Absolute Solver.',
 ];
 
-const MD_LORE = [
-  '**JCJenson Inc.** created Worker Drones to mine Copper-9 after Earth became uninhabitable.',
-  '**Disassembly Drones** were deployed to eliminate Worker Drones after the mining project ended.',
-  '**The Absolute Solver** is an extradimensional entity that can possess drones and grant them reality-warping abilities.',
-  '**Copper-9** is a frozen, post-apocalyptic planet — humanity\'s dumping ground for obsolete machines.',
-  '**Serial Designation N** was the first Disassembly Drone seen to show genuine care for Worker Drones.',
-  '**Uzi Doorman** was infected by the Absolute Solver after finding an alien artifact.',
-  'Worker Drones have **self-repair nanites** in their oil that keep them functional.',
-  'Disassembly Drones have a **built-in acid** that prevents Worker Drone nanites from repairing them in sunlight.',
-  '**V** has been a Disassembly Drone the longest — and it shows.',
-  '**Cabin Fever** (episode 4) revealed the full extent of what the Absolute Solver can do.',
-];
-
-const COMPLIMENTS = [
-  'You are operating at above-average efficiency.',
-  'Acceptable. That is high praise from me.',
-  'Your threat assessment rating is surprisingly low today.',
-  'You have not caused any incidents yet. Commendable.',
-  'Processing complete. You are not terrible.',
-  'I have reviewed your file. It is not entirely disappointing.',
-  'Your survival instincts appear functional.',
-  'You have cleared the minimum competency threshold.',
-  'I expected worse. I was wrong. Noted.',
-];
-
-const pick = arr => arr[Math.floor(Math.random() * arr.length)];
-
 // ════════════════════════════════════════════════════════════════════
-//  HELPERS
+//  COMMAND HANDLERS
 // ════════════════════════════════════════════════════════════════════
 
-const isOwner      = id => id === OWNER_ID;
-const isAuthorized = id => authorizedUsers.has(id);
-const isMuted      = ()  => Date.now() < shutUpUntil;
+const commands = {
 
-async function safeReply(msg, text) {
-  try { await msg.channel.send(text); }
-  catch (e) { console.error('[SEND ERROR]', e.message); }
-}
+  // ── AI RESPONSE ───────────────────────────────────────────────
+  async j(msg, args) {
+    const prompt = args.join(' ').trim();
+    if (!prompt) return msg.reply('Say something. I can\'t respond to silence.');
 
-function formatUptime(ms) {
-  const s = Math.floor(ms / 1000);
-  const m = Math.floor(s / 60);
-  const h = Math.floor(m / 60);
-  const d = Math.floor(h / 24);
-  if (d) return `${d}d ${h % 24}h ${m % 60}m`;
-  if (h) return `${h}h ${m % 60}m`;
-  if (m) return `${m}m ${s % 60}s`;
-  return `${s}s`;
-}
+    const mem = await getMemory(msg.author.id);
+    const updated = refreshMemory(mem, msg.author.username, prompt);
 
-// ════════════════════════════════════════════════════════════════════
-//  COMMANDS  (prefix: >)
-// ════════════════════════════════════════════════════════════════════
+    let reply;
+    try {
+      reply = await askJ(prompt, updated);
+    } catch (e) {
+      console.error('[CMD:j]', e.message);
+      reply = 'Cloudflare is being uncooperative. Not my fault.';
+    }
 
-const COMMANDS = {
+    await saveMemory(updated);
+    return msg.reply(reply);
+  },
 
-  '>help': async (msg) => {
-    await safeReply(msg,
-      `**Serial Designation J — Command List** (prefix: \`>\`)\n` +
-      `\`>j [message]\` — Talk to J directly\n` +
-      `\`>roast [@user]\` — Get roasted\n` +
-      `\`>8ball [question]\` — Ask the 8-ball\n` +
-      `\`>mdquote\` — Random Murder Drones quote\n` +
-      `\`>mdfact\` — Random Murder Drones fact\n` +
-      `\`>mdlore\` — Random Murder Drones lore\n` +
-      `\`>compliment [@user]\` — Receive a compliment (barely)\n` +
-      `\`>ABSLWI\` — Link to the Absolute Solver Wiki\n` +
-      `\`>uptime\` — Bot uptime\n` +
-      `\`>mutestatus\` — Check if J is muted\n` +
-      `\`>shutup [minutes]\` — Silence J (owner only)\n` +
-      `\`>unshut\` / \`>jspeak\` — Resume J (owner only)\n` +
-      `\`>authorize [@user]\` — Authorize a user to use \`>j\` (owner only)\n` +
-      `\`>deauth [@user]\` — Remove user authorization (owner only)\n`
+  // ── MUTE ──────────────────────────────────────────────────────
+  shutup(msg, args) {
+    const minutes = parseInt(args[0], 10);
+    if (!minutes || minutes < 1) return msg.reply('Usage: `>shutup <minutes>`');
+    shutUpUntil = Date.now() + minutes * 60_000;
+    return msg.reply(`Fine. I'll be quiet for ${minutes} minute${minutes === 1 ? '' : 's'}. Don't get used to it.`);
+  },
+
+  // ── UNMUTE ────────────────────────────────────────────────────
+  unshut(msg) {
+    shutUpUntil = 0;
+    return msg.reply('Back. Try not to waste it.');
+  },
+
+  jspeak(msg) {
+    shutUpUntil = 0;
+    return msg.reply('Back. Try not to waste it.');
+  },
+
+  // ── MUTE STATUS ───────────────────────────────────────────────
+  mutestatus(msg) {
+    if (!isMuted()) return msg.reply('I am not muted. Obviously.');
+    const remaining = Math.ceil((shutUpUntil - Date.now()) / 60_000);
+    return msg.reply(`Muted for ${remaining} more minute${remaining === 1 ? '' : 's'}.`);
+  },
+
+  // ── ROAST ─────────────────────────────────────────────────────
+  roast(msg) {
+    return msg.reply(pick(ROASTS));
+  },
+
+  // ── 8BALL ─────────────────────────────────────────────────────
+  '8ball'(msg, args) {
+    const q = args.join(' ').trim();
+    if (!q) return msg.reply('Ask a question. The ball needs something to work with.');
+    return msg.reply(`🎱 ${pick(EIGHTBALL)}`);
+  },
+
+  // ── QUOTE ─────────────────────────────────────────────────────
+  quote(msg) {
+    return msg.reply(`📼 ${pick(MD_QUOTES)}`);
+  },
+
+  // ── FACT ──────────────────────────────────────────────────────
+  fact(msg) {
+    return msg.reply(`📡 ${pick(MD_FACTS)}`);
+  },
+
+  // ── WIKI LINK ─────────────────────────────────────────────────
+  abslwi(msg) {
+    return msg.reply('📖 **Absolute Solver Wiki v2:** https://absolute-solver-wiki-v2.com');
+  },
+
+  // ── BOT INFO ──────────────────────────────────────────────────
+  jinfo(msg) {
+    const upSec  = Math.floor((Date.now() - START_TIME) / 1000);
+    const upMin  = Math.floor(upSec / 60);
+    const upHour = Math.floor(upMin / 60);
+    const upStr  = upHour > 0
+      ? `${upHour}h ${upMin % 60}m`
+      : `${upMin}m ${upSec % 60}s`;
+
+    const muteStr = isMuted()
+      ? `Muted — ${Math.ceil((shutUpUntil - Date.now()) / 60_000)} min remaining`
+      : 'Active';
+
+    return msg.reply(
+      `**Serial Designation J** | Disassembly Unit\n` +
+      `Uptime: \`${upStr}\`  |  Status: \`${muteStr}\`\n` +
+      `AI: Cloudflare Workers AI (Llama 3.1 8B)\n` +
+      `Memory: ${SUPABASE_URL ? 'Supabase (online)' : 'Disabled'}`
     );
   },
 
-  '>ABSLWI': async (msg) => {
-    await safeReply(msg, '📖 **Absolute Solver Wiki v2:** https://absolute-solver-wiki-v2.com');
+  // ── PING ──────────────────────────────────────────────────────
+  ping(msg) {
+    return msg.reply(`Pong. ${client.ws.ping}ms. You're welcome.`);
   },
 
-  '>uptime': async (msg) => {
-    await safeReply(msg, `⏱ Uptime: **${formatUptime(Date.now() - startTime)}**`);
+  // ── HELP ──────────────────────────────────────────────────────
+  help(msg) {
+    return msg.reply(
+      '**Commands** *(prefix: `>`)*\n' +
+      '`>j <message>` — Talk to J\n' +
+      '`>roast` — Receive a roast\n' +
+      '`>8ball <question>` — Ask the magic 8-ball\n' +
+      '`>quote` — Random Murder Drones quote\n' +
+      '`>fact` — Random Murder Drones fact\n' +
+      '`>abslwi` — Link to the Absolute Solver Wiki\n' +
+      '`>ping` — Latency check\n' +
+      '`>jinfo` — Bot status\n' +
+      '`>mutestatus` — Check if J is muted\n' +
+      '\n**Owner only:**\n' +
+      '`>shutup <minutes>` — Mute J\n' +
+      '`>unshut` / `>jspeak` — Unmute J\n' +
+      '`>adduser <@user>` — Grant command access\n' +
+      '`>removeuser <@user>` — Revoke command access'
+    );
   },
 
-  '>mutestatus': async (msg) => {
-    if (isMuted()) {
-      const remaining = Math.ceil((shutUpUntil - Date.now()) / 60000);
-      await safeReply(msg, `🔇 J is muted. **${remaining} minute(s)** remaining.`);
-    } else {
-      await safeReply(msg, '🔊 J is not muted.');
-    }
-  },
-
-  '>shutup': async (msg, args) => {
-    if (!isOwner(msg.author.id)) return safeReply(msg, 'You are not authorized to do that.');
-    const minutes = parseInt(args[0]) || 10;
-    shutUpUntil = Date.now() + minutes * 60 * 1000;
-    await safeReply(msg, `🔇 Fine. Silenced for **${minutes} minute(s)**. Don't make it weird.`);
-  },
-
-  '>unshut': async (msg) => {
-    if (!isOwner(msg.author.id)) return safeReply(msg, 'You are not authorized to do that.');
-    shutUpUntil = 0;
-    await safeReply(msg, '🔊 Fine. I\'m back. You\'re welcome.');
-  },
-
-  '>jspeak': async (msg) => {
-    if (!isOwner(msg.author.id)) return safeReply(msg, 'You are not authorized to do that.');
-    shutUpUntil = 0;
-    await safeReply(msg, '🔊 Mute lifted. Back to standard operations.');
-  },
-
-  '>authorize': async (msg) => {
-    if (!isOwner(msg.author.id)) return safeReply(msg, 'You are not authorized to do that.');
+  // ── USER MANAGEMENT (owner only) ─────────────────────────────
+  adduser(msg, args) {
+    if (msg.author.id !== OWNER_ID) return msg.reply('No.');
     const target = msg.mentions.users.first();
-    if (!target) return safeReply(msg, 'Mention the user you want to authorize.');
+    if (!target) return msg.reply('Mention a user.');
     authorizedUsers.add(target.id);
-    await safeReply(msg, `✅ **${target.username}** is now authorized to use \`>j\`.`);
+    return msg.reply(`${target.username} added to authorized list.`);
   },
 
-  '>deauth': async (msg) => {
-    if (!isOwner(msg.author.id)) return safeReply(msg, 'You are not authorized to do that.');
+  removeuser(msg, args) {
+    if (msg.author.id !== OWNER_ID) return msg.reply('No.');
     const target = msg.mentions.users.first();
-    if (!target) return safeReply(msg, 'Mention the user to deauthorize.');
-    if (target.id === OWNER_ID) return safeReply(msg, 'Cannot deauthorize the owner.');
+    if (!target) return msg.reply('Mention a user.');
+    if (target.id === OWNER_ID) return msg.reply('Cannot remove the owner.');
     authorizedUsers.delete(target.id);
-    await safeReply(msg, `❌ **${target.username}** has been deauthorized.`);
+    return msg.reply(`${target.username} removed.`);
   },
 
-  '>roast': async (msg) => {
-    const target = msg.mentions.users.first() ?? msg.author;
-    await safeReply(msg, `${target}: ${pick(ROASTS)}`);
-  },
-
-  '>8ball': async (msg, args) => {
-    if (!args.length) return safeReply(msg, 'Ask an actual question.');
-    await safeReply(msg, `🎱 ${pick(EIGHTBALL)}`);
-  },
-
-  '>mdquote': async (msg) => {
-    await safeReply(msg, `💬 *"${pick(MD_QUOTES)}"*`);
-  },
-
-  '>mdfact': async (msg) => {
-    await safeReply(msg, `📌 **MD Fact:** ${pick(MD_FACTS)}`);
-  },
-
-  '>mdlore': async (msg) => {
-    await safeReply(msg, `📜 **Lore:** ${pick(MD_LORE)}`);
-  },
-
-  '>compliment': async (msg) => {
-    const target = msg.mentions.users.first() ?? msg.author;
-    await safeReply(msg, `${target}: ${pick(COMPLIMENTS)}`);
-  },
-
-  '>j': async (msg, args) => {
-    if (!isAuthorized(msg.author.id)) {
-      return safeReply(msg, 'You are not authorized to use this command.');
-    }
-    if (!args.length) return safeReply(msg, 'You need to actually say something.');
-
-    const prompt = args.join(' ');
-    await msg.channel.sendTyping().catch(() => {});
-
-    const mem = await getMemory(msg.author.id);
-    mem.username = msg.author.username;
-
-    try {
-      const reply = await askCloudflare(prompt, mem);
-      updateMemory(mem, prompt);
-      await upsertMemory(mem);
-      await safeReply(msg, reply);
-    } catch (e) {
-      console.error('[J ERROR]', e.message);
-      await safeReply(msg, 'Something broke. Probably your fault.');
-    }
-  },
 };
 
 // ════════════════════════════════════════════════════════════════════
 //  MESSAGE HANDLER
 // ════════════════════════════════════════════════════════════════════
 
-client.on('messageCreate', async (msg) => {
+client.on('messageCreate', async msg => {
   if (msg.author.bot) return;
 
-  const content = msg.content.trim();
-  const parts   = content.split(/\s+/);
-  const cmd     = parts[0]; // case-sensitive for > prefix
-  const args    = parts.slice(1);
+  const isCommand = msg.content.startsWith(PREFIX);
 
-  // ── Execute known command ────────────────────────────────────
-  if (COMMANDS[cmd]) {
+  // ── COMMAND ROUTING ───────────────────────────────────────────
+  if (isCommand) {
+    const [rawCmd, ...args] = msg.content.slice(PREFIX.length).trim().split(/\s+/);
+    const cmd = rawCmd.toLowerCase();
+
+    const handler = commands[cmd];
+    if (!handler) return; // unknown command — silently ignore
+
     try {
-      await COMMANDS[cmd](msg, args);
+      await handler(msg, args);
     } catch (e) {
-      console.error('[CMD ERROR]', cmd, e.message);
-      await safeReply(msg, 'Command failed.');
+      console.error(`[CMD:${cmd}]`, e.message);
+      msg.reply('Something broke. It wasn\'t me.').catch(() => {});
     }
     return;
   }
 
-  // ── Auto-reply (70%) — skip short messages and command-like messages ──
-  if (!isMuted() && !content.startsWith(PREFIX) && content.length >= 4 && Math.random() < AUTO_REPLY_CHANCE) {
-    const mem = await getMemory(msg.author.id);
-    mem.username = msg.author.username;
+  // ── AUTO-REPLY (70% chance, mute-aware) ──────────────────────
+  if (isMuted()) return;
+  if (Math.random() > AUTO_REPLY_CHANCE) return;
 
-    try {
-      await msg.channel.sendTyping().catch(() => {});
-      const reply = await askCloudflare(content, mem);
-      updateMemory(mem, content);
-      await upsertMemory(mem);
-      await safeReply(msg, reply);
-    } catch (e) {
-      console.error('[AUTO-REPLY ERROR]', e.message);
-    }
+  // Don't reply to very short messages (under 4 chars)
+  if (msg.content.trim().length < 4) return;
+
+  const mem = await getMemory(msg.author.id);
+  const updated = refreshMemory(mem, msg.author.username, msg.content);
+
+  let reply;
+  try {
+    reply = await askJ(msg.content, updated);
+  } catch (e) {
+    console.error('[AUTO]', e.message);
+    return; // silent fail on auto-reply
   }
+
+  await saveMemory(updated);
+  msg.reply(reply).catch(e => console.error('[AUTO reply]', e.message));
 });
 
 // ════════════════════════════════════════════════════════════════════
-//  READY
+//  STARTUP
 // ════════════════════════════════════════════════════════════════════
 
 client.once('ready', () => {
-  console.log(`[READY] Logged in as ${client.user.tag}`);
-  console.log(`[READY] Serving ${client.guilds.cache.size} guild(s)`);
-  client.user.setActivity('Disassembling drones', { type: DJS.ActivityType.Watching });
+  console.log(`[ONLINE] ${client.user.tag} is operational.`);
+  console.log(`[CONFIG] Cloudflare AI: ${CF_ACCOUNT_ID ? 'OK' : 'MISSING'}`);
+  console.log(`[CONFIG] Supabase:      ${SUPABASE_URL  ? 'OK' : 'MISSING'}`);
 });
 
-// ════════════════════════════════════════════════════════════════════
-//  BOOT
-// ════════════════════════════════════════════════════════════════════
+client.on('error', e => console.error('[CLIENT ERROR]', e.message));
+process.on('unhandledRejection', e => console.error('[UNHANDLED]', e));
 
 if (!DISCORD_TOKEN) {
   console.error('[FATAL] DISCORD_TOKEN is not set. Exiting.');
   process.exit(1);
 }
 
-client.login(DISCORD_TOKEN).catch(e => {
-  console.error('[FATAL] Login failed:', e.message);
-  process.exit(1);
-});
+client.login(DISCORD_TOKEN);
