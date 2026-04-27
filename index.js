@@ -1,7 +1,6 @@
 // ═══════════════════════════════════════════════════════════════════
 //  Serial Designation J — Discord Bot
 //  Built for The Absolute Server
-//  Remade from scratch — clean, sharp, no excuses.
 // ═══════════════════════════════════════════════════════════════════
 
 'use strict';
@@ -10,21 +9,25 @@ const { Client, GatewayIntentBits, Partials } = require('discord.js');
 const https = require('https');
 
 // ── ENV ───────────────────────────────────────────────────────────
-const DISCORD_TOKEN  = process.env.DISCORD_TOKEN  || process.env.BOT_TOKEN || '';
-const CF_ACCOUNT_ID  = process.env.CLOUDFLARE_ACCOUNT_ID || '';
-const CF_API_TOKEN   = process.env.CLOUDFLARE_API_TOKEN  || '';
-const SUPABASE_URL   = process.env.SUPABASE_URL   || '';
-const SUPABASE_KEY   = process.env.SUPABASE_KEY   || '';
+const DISCORD_TOKEN = process.env.DISCORD_TOKEN || process.env.BOT_TOKEN || '';
+const CF_ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID || '';
+const CF_API_TOKEN  = process.env.CLOUDFLARE_API_TOKEN  || '';
+const SUPABASE_URL  = process.env.SUPABASE_URL  || '';
+const SUPABASE_KEY  = process.env.SUPABASE_KEY  || '';
 
 // ── CONFIG ────────────────────────────────────────────────────────
-const PREFIX            = '>';
-const OWNER_ID          = '1326338080696832010';
-const AUTO_REPLY_CHANCE = 0.70;
+const PREFIX      = '>';
+const CHAT_PREFIX = '?';
+const OWNER_ID    = '1326338080696832010';
+const MAX_HISTORY = 20; // max messages kept in short-term chat memory
 
 // ── STATE ─────────────────────────────────────────────────────────
-let shutUpUntil     = 0;                      // epoch ms — J is muted until this
-let authorizedUsers = new Set([OWNER_ID]);     // users allowed to run admin commands
+let shutUpUntil     = 0;
+let authorizedUsers = new Set([OWNER_ID]);
 const START_TIME    = Date.now();
+
+// Active chat sessions: Map<userId, { channelId, history: [{role, content}] }>
+const activeSessions = new Map();
 
 // ── CLIENT ────────────────────────────────────────────────────────
 const client = new Client({
@@ -42,17 +45,10 @@ const client = new Client({
 //  UTILITIES
 // ════════════════════════════════════════════════════════════════════
 
-function pick(arr) {
-  return arr[Math.floor(Math.random() * arr.length)];
-}
-
-function isMuted() {
-  return Date.now() < shutUpUntil;
-}
-
-function isAuthorized(userId) {
-  return authorizedUsers.has(userId);
-}
+const pick         = arr => arr[Math.floor(Math.random() * arr.length)];
+const isMuted      = ()  => Date.now() < shutUpUntil;
+const isOwner      = id  => id === OWNER_ID;
+const isAuthorized = id  => authorizedUsers.has(id);
 
 function httpsRequest(options, body) {
   return new Promise((resolve, reject) => {
@@ -117,11 +113,11 @@ async function saveMemory(mem) {
       path:     url.pathname + url.search,
       method:   'POST',
       headers: {
-        'apikey':          SUPABASE_KEY,
-        'Authorization':   'Bearer ' + SUPABASE_KEY,
-        'Content-Type':    'application/json',
-        'Prefer':          'return=minimal,resolution=merge-duplicates',
-        'Content-Length':  Buffer.byteLength(bodyStr),
+        'apikey':         SUPABASE_KEY,
+        'Authorization':  'Bearer ' + SUPABASE_KEY,
+        'Content-Type':   'application/json',
+        'Prefer':         'return=minimal,resolution=merge-duplicates',
+        'Content-Length': Buffer.byteLength(bodyStr),
       },
     };
     await httpsRequest(opts, bodyStr);
@@ -135,23 +131,20 @@ function refreshMemory(mem, username, message) {
   mem.interaction_count = (mem.interaction_count || 0) + 1;
   mem.last_seen         = new Date().toISOString();
 
-  // detect name introduction
   const nameMatch = message.match(/(?:my name is|i(?:'|'| a)?m|call me)\s+([A-Za-z]+)/i);
   if (nameMatch) {
     const tag = `name:${nameMatch[1]}`;
-    if (!mem.notes.includes(tag)) {
-      mem.notes = (tag + ' ' + mem.notes).trim().slice(0, 800);
+    if (!(mem.notes || '').includes(tag)) {
+      mem.notes = (tag + ' ' + (mem.notes || '')).trim().slice(0, 800);
     }
   }
 
-  // detect annoying patterns
   const annoying = ['lol', 'lmao', 'bruh', 'bro', 'haha', 'xd', 'ugh', 'omg'];
-  const hits      = annoying.filter(w => message.toLowerCase().includes(w)).length;
-  if (hits >= 2 && !mem.notes.includes('trait:annoying')) {
-    mem.notes = (mem.notes + ' trait:annoying').trim().slice(0, 800);
+  const hits     = annoying.filter(w => message.toLowerCase().includes(w)).length;
+  if (hits >= 2 && !(mem.notes || '').includes('trait:annoying')) {
+    mem.notes = ((mem.notes || '') + ' trait:annoying').trim().slice(0, 800);
   }
 
-  // attitude progression
   const c = mem.interaction_count;
   if      (c >= 20) mem.attitude = 'grudging_respect';
   else if (c >= 10) mem.attitude = 'mildly_tolerant';
@@ -163,7 +156,6 @@ function refreshMemory(mem, username, message) {
 
 function buildContextFromMemory(mem) {
   const lines = [];
-
   if (mem.username) lines.push(`Discord username: ${mem.username}`);
 
   (mem.notes || '').trim().split(/\s+/).forEach(part => {
@@ -174,13 +166,12 @@ function buildContextFromMemory(mem) {
   lines.push(`You've spoken with this user ${mem.interaction_count || 0} time(s).`);
 
   const attitudes = {
-    grudging_respect: 'You have grudging respect for them. You\'d never admit it.',
-    mildly_tolerant:  'They\'re mildly tolerable. That\'s above average for you.',
+    grudging_respect: "You have grudging respect for them. You'd never admit it.",
+    mildly_tolerant:  "They're mildly tolerable. That's above average for you.",
     unimpressed:      'You are unimpressed so far.',
     neutral:          'New user. Standard professional indifference.',
   };
   lines.push(attitudes[mem.attitude] || attitudes.neutral);
-
   return lines.join('\n');
 }
 
@@ -200,6 +191,7 @@ const J_SYSTEM = [
   'NEVER start a response with "J:" or your name.',
 ].join(' ');
 
+// Standard single-turn AI call (used by >j)
 async function askJ(prompt, mem) {
   if (!CF_ACCOUNT_ID || !CF_API_TOKEN) throw new Error('Missing Cloudflare credentials');
 
@@ -226,7 +218,36 @@ async function askJ(prompt, mem) {
     console.error('[CF] Error:', JSON.stringify(body?.errors));
     throw new Error('Cloudflare API returned failure');
   }
+  return (body.result?.response || '').trim() || 'No response.';
+}
 
+// Multi-turn AI call (used by ?Jchat sessions) — passes full conversation history
+async function askJWithHistory(history, mem) {
+  if (!CF_ACCOUNT_ID || !CF_API_TOKEN) throw new Error('Missing Cloudflare credentials');
+
+  const messages = [
+    { role: 'system', content: J_SYSTEM + '\n\n' + buildContextFromMemory(mem) },
+    ...history,
+  ];
+
+  const bodyStr = JSON.stringify({ messages });
+
+  const opts = {
+    hostname: 'api.cloudflare.com',
+    path:     `/client/v4/accounts/${CF_ACCOUNT_ID}/ai/run/@cf/meta/llama-3.1-8b-instruct`,
+    method:   'POST',
+    headers: {
+      'Authorization':  `Bearer ${CF_API_TOKEN}`,
+      'Content-Type':   'application/json',
+      'Content-Length': Buffer.byteLength(bodyStr),
+    },
+  };
+
+  const { body } = await httpsRequest(opts, bodyStr);
+  if (!body?.success) {
+    console.error('[CF] Error:', JSON.stringify(body?.errors));
+    throw new Error('Cloudflare API returned failure');
+  }
   return (body.result?.response || '').trim() || 'No response.';
 }
 
@@ -235,16 +256,16 @@ async function askJ(prompt, mem) {
 // ════════════════════════════════════════════════════════════════════
 
 const ROASTS = [
-  'I would roast you but my parents told me not to burn trash.',
-  'You are the reason they put instructions on shampoo bottles.',
-  'I\'ve seen better plans written on a napkin.',
-  'Your wifi password is probably your pet\'s name. Twice.',
-  'You bring everyone so much joy when you leave.',
-  'I would call you a tool but that implies you are useful.',
-  'Error 404: Intelligence not found.',
-  'You are proof that evolution can go in reverse.',
-  'I\'ve met furniture with more personality.',
-  'Your birth certificate is an apology letter.',
+  "I would roast you but my parents told me not to burn trash.",
+  "You are the reason they put instructions on shampoo bottles.",
+  "I've seen better plans written on a napkin.",
+  "Your wifi password is probably your pet's name. Twice.",
+  "You bring everyone so much joy when you leave.",
+  "I would call you a tool but that implies you are useful.",
+  "Error 404: Intelligence not found.",
+  "You are proof that evolution can go in reverse.",
+  "I've met furniture with more personality.",
+  "Your birth certificate is an apology letter.",
 ];
 
 const EIGHTBALL = [
@@ -284,17 +305,17 @@ const MD_FACTS = [
 ];
 
 // ════════════════════════════════════════════════════════════════════
-//  COMMAND HANDLERS
+//  COMMANDS  (prefix: >)
+//  ALL require authorization. Owner-only commands check isOwner().
 // ════════════════════════════════════════════════════════════════════
 
 const commands = {
 
-  // ── AI RESPONSE ───────────────────────────────────────────────
   async j(msg, args) {
     const prompt = args.join(' ').trim();
-    if (!prompt) return msg.reply('Say something. I can\'t respond to silence.');
+    if (!prompt) return msg.reply("Say something. I can't respond to silence.");
 
-    const mem = await getMemory(msg.author.id);
+    const mem     = await getMemory(msg.author.id);
     const updated = refreshMemory(mem, msg.author.username, prompt);
 
     let reply;
@@ -309,172 +330,249 @@ const commands = {
     return msg.reply(reply);
   },
 
-  // ── MUTE ──────────────────────────────────────────────────────
   shutup(msg, args) {
+    if (!isOwner(msg.author.id)) return msg.reply('No.');
     const minutes = parseInt(args[0], 10);
     if (!minutes || minutes < 1) return msg.reply('Usage: `>shutup <minutes>`');
     shutUpUntil = Date.now() + minutes * 60_000;
-    return msg.reply(`Fine. I'll be quiet for ${minutes} minute${minutes === 1 ? '' : 's'}. Don't get used to it.`);
+    return msg.reply(`Fine. ${minutes} minute${minutes === 1 ? '' : 's'}. Don't get used to it.`);
   },
 
-  // ── UNMUTE ────────────────────────────────────────────────────
   unshut(msg) {
+    if (!isOwner(msg.author.id)) return msg.reply('No.');
     shutUpUntil = 0;
-    return msg.reply('Back. Try not to waste it.');
+    return msg.reply("Back. Try not to waste it.");
   },
 
   jspeak(msg) {
+    if (!isOwner(msg.author.id)) return msg.reply('No.');
     shutUpUntil = 0;
-    return msg.reply('Back. Try not to waste it.');
+    return msg.reply("Back. Try not to waste it.");
   },
 
-  // ── MUTE STATUS ───────────────────────────────────────────────
   mutestatus(msg) {
-    if (!isMuted()) return msg.reply('I am not muted. Obviously.');
+    if (!isMuted()) return msg.reply('Not muted. Obviously.');
     const remaining = Math.ceil((shutUpUntil - Date.now()) / 60_000);
     return msg.reply(`Muted for ${remaining} more minute${remaining === 1 ? '' : 's'}.`);
   },
 
-  // ── ROAST ─────────────────────────────────────────────────────
+  adduser(msg) {
+    if (!isOwner(msg.author.id)) return msg.reply('No.');
+    const target = msg.mentions.users.first();
+    if (!target) return msg.reply('Mention a user. Usage: `>adduser @user`');
+    authorizedUsers.add(target.id);
+    return msg.reply(`✅ **${target.username}** is now authorized.`);
+  },
+
+  removeuser(msg) {
+    if (!isOwner(msg.author.id)) return msg.reply('No.');
+    const target = msg.mentions.users.first();
+    if (!target) return msg.reply('Mention a user. Usage: `>removeuser @user`');
+    if (target.id === OWNER_ID) return msg.reply("Can't remove the owner.");
+    authorizedUsers.delete(target.id);
+    return msg.reply(`❌ **${target.username}** has been deauthorized.`);
+  },
+
+  listusers(msg) {
+    if (!isOwner(msg.author.id)) return msg.reply('No.');
+    const ids = [...authorizedUsers].map(id => `\`${id}\``).join('\n') || 'None.';
+    return msg.reply(`**Authorized users:**\n${ids}`);
+  },
+
   roast(msg) {
     return msg.reply(pick(ROASTS));
   },
 
-  // ── 8BALL ─────────────────────────────────────────────────────
   '8ball'(msg, args) {
     const q = args.join(' ').trim();
-    if (!q) return msg.reply('Ask a question. The ball needs something to work with.');
+    if (!q) return msg.reply('Ask a question.');
     return msg.reply(`🎱 ${pick(EIGHTBALL)}`);
   },
 
-  // ── QUOTE ─────────────────────────────────────────────────────
   quote(msg) {
     return msg.reply(`📼 ${pick(MD_QUOTES)}`);
   },
 
-  // ── FACT ──────────────────────────────────────────────────────
   fact(msg) {
     return msg.reply(`📡 ${pick(MD_FACTS)}`);
   },
 
-  // ── WIKI LINK ─────────────────────────────────────────────────
   abslwi(msg) {
     return msg.reply('📖 **Absolute Solver Wiki v2:** https://absolute-solver-wiki-v2.com');
   },
 
-  // ── BOT INFO ──────────────────────────────────────────────────
+  ping(msg) {
+    return msg.reply(`Pong. ${client.ws.ping}ms.`);
+  },
+
   jinfo(msg) {
     const upSec  = Math.floor((Date.now() - START_TIME) / 1000);
     const upMin  = Math.floor(upSec / 60);
     const upHour = Math.floor(upMin / 60);
-    const upStr  = upHour > 0
-      ? `${upHour}h ${upMin % 60}m`
-      : `${upMin}m ${upSec % 60}s`;
-
+    const upStr  = upHour > 0 ? `${upHour}h ${upMin % 60}m` : `${upMin}m ${upSec % 60}s`;
     const muteStr = isMuted()
       ? `Muted — ${Math.ceil((shutUpUntil - Date.now()) / 60_000)} min remaining`
       : 'Active';
-
     return msg.reply(
       `**Serial Designation J** | Disassembly Unit\n` +
       `Uptime: \`${upStr}\`  |  Status: \`${muteStr}\`\n` +
       `AI: Cloudflare Workers AI (Llama 3.1 8B)\n` +
-      `Memory: ${SUPABASE_URL ? 'Supabase (online)' : 'Disabled'}`
+      `Memory: ${SUPABASE_URL ? 'Supabase (online)' : 'Disabled'}\n` +
+      `Authorized users: ${authorizedUsers.size}\n` +
+      `Active chat sessions: ${activeSessions.size}`
     );
   },
 
-  // ── PING ──────────────────────────────────────────────────────
-  ping(msg) {
-    return msg.reply(`Pong. ${client.ws.ping}ms. You're welcome.`);
-  },
-
-  // ── HELP ──────────────────────────────────────────────────────
   help(msg) {
+    const ownerCmds = isOwner(msg.author.id)
+      ? '\n**Owner only:**\n' +
+        '`>shutup <minutes>` — Mute J\n' +
+        '`>unshut` / `>jspeak` — Unmute J\n' +
+        '`>adduser @user` — Authorize a user\n' +
+        '`>removeuser @user` — Deauthorize a user\n' +
+        '`>listusers` — Show all authorized users'
+      : '';
+
     return msg.reply(
       '**Commands** *(prefix: `>`)*\n' +
-      '`>j <message>` — Talk to J\n' +
+      '`>j <message>` — Talk to J (single message)\n' +
       '`>roast` — Receive a roast\n' +
       '`>8ball <question>` — Ask the magic 8-ball\n' +
       '`>quote` — Random Murder Drones quote\n' +
       '`>fact` — Random Murder Drones fact\n' +
-      '`>abslwi` — Link to the Absolute Solver Wiki\n' +
+      '`>abslwi` — Absolute Solver Wiki link\n' +
       '`>ping` — Latency check\n' +
       '`>jinfo` — Bot status\n' +
       '`>mutestatus` — Check if J is muted\n' +
-      '\n**Owner only:**\n' +
-      '`>shutup <minutes>` — Mute J\n' +
-      '`>unshut` / `>jspeak` — Unmute J\n' +
-      '`>adduser <@user>` — Grant command access\n' +
-      '`>removeuser <@user>` — Revoke command access'
+      '\n**Chat session** *(prefix: `?`)*\n' +
+      '`?Jchat` — Start a private chat session with J\n' +
+      '`?Jstop` — End your chat session' +
+      ownerCmds
     );
   },
-
-  // ── USER MANAGEMENT (owner only) ─────────────────────────────
-  adduser(msg, args) {
-    if (msg.author.id !== OWNER_ID) return msg.reply('No.');
-    const target = msg.mentions.users.first();
-    if (!target) return msg.reply('Mention a user.');
-    authorizedUsers.add(target.id);
-    return msg.reply(`${target.username} added to authorized list.`);
-  },
-
-  removeuser(msg, args) {
-    if (msg.author.id !== OWNER_ID) return msg.reply('No.');
-    const target = msg.mentions.users.first();
-    if (!target) return msg.reply('Mention a user.');
-    if (target.id === OWNER_ID) return msg.reply('Cannot remove the owner.');
-    authorizedUsers.delete(target.id);
-    return msg.reply(`${target.username} removed.`);
-  },
-
 };
+
+// ════════════════════════════════════════════════════════════════════
+//  CHAT SESSION COMMANDS  (prefix: ?)
+//  ?Jchat — start session
+//  ?Jstop — end session
+//  Any other message from a user in an active session → J responds
+// ════════════════════════════════════════════════════════════════════
+
+async function handleChatCommand(msg, cmd) {
+  const userId = msg.author.id;
+
+  // ── ?Jchat — START SESSION ────────────────────────────────────
+  if (cmd === 'jchat') {
+    if (!isAuthorized(userId)) {
+      return msg.reply("You're not authorized to use this bot.").catch(() => {});
+    }
+
+    if (activeSessions.has(userId)) {
+      return msg.reply("You already have an active session. Use `?Jstop` to end it first.");
+    }
+
+    activeSessions.set(userId, {
+      channelId: msg.channel.id,
+      history:   [],
+    });
+
+    return msg.reply(
+      "Session started. Talk to me. I'll remember what you say until you use `?Jstop`.\n" +
+      "*Just type normally — no prefix needed.*"
+    );
+  }
+
+  // ── ?Jstop — END SESSION ──────────────────────────────────────
+  if (cmd === 'jstop') {
+    if (!activeSessions.has(userId)) {
+      return msg.reply("You don't have an active session.");
+    }
+
+    const session = activeSessions.get(userId);
+    const turns   = Math.floor(session.history.length / 2);
+    activeSessions.delete(userId);
+
+    return msg.reply(`Session ended. ${turns} exchange${turns === 1 ? '' : 's'} logged. Moving on.`);
+  }
+}
 
 // ════════════════════════════════════════════════════════════════════
 //  MESSAGE HANDLER
 // ════════════════════════════════════════════════════════════════════
 
 client.on('messageCreate', async msg => {
-  if (msg.author.bot) return;
-
-  const isCommand = msg.content.startsWith(PREFIX);
-
-  // ── COMMAND ROUTING ───────────────────────────────────────────
-  if (isCommand) {
-    const [rawCmd, ...args] = msg.content.slice(PREFIX.length).trim().split(/\s+/);
-    const cmd = rawCmd.toLowerCase();
-
-    const handler = commands[cmd];
-    if (!handler) return; // unknown command — silently ignore
-
-    try {
-      await handler(msg, args);
-    } catch (e) {
-      console.error(`[CMD:${cmd}]`, e.message);
-      msg.reply('Something broke. It wasn\'t me.').catch(() => {});
-    }
-    return;
-  }
-
-  // ── AUTO-REPLY (70% chance, mute-aware) ──────────────────────
-  if (isMuted()) return;
-  if (Math.random() > AUTO_REPLY_CHANCE) return;
-
-  // Don't reply to very short messages (under 4 chars)
-  if (msg.content.trim().length < 4) return;
-
-  const mem = await getMemory(msg.author.id);
-  const updated = refreshMemory(mem, msg.author.username, msg.content);
-
-  let reply;
   try {
-    reply = await askJ(msg.content, updated);
-  } catch (e) {
-    console.error('[AUTO]', e.message);
-    return; // silent fail on auto-reply
-  }
+    if (msg.author.bot) return;
 
-  await saveMemory(updated);
-  msg.reply(reply).catch(e => console.error('[AUTO reply]', e.message));
+    const content = msg.content.trim();
+    if (!content) return;
+
+    const userId = msg.author.id;
+
+    // ── ? PREFIX — CHAT SESSION COMMANDS ─────────────────────────
+    if (content.startsWith(CHAT_PREFIX)) {
+      const cmd = content.slice(CHAT_PREFIX.length).trim().toLowerCase();
+      await handleChatCommand(msg, cmd);
+      return;
+    }
+
+    // ── > PREFIX — STANDARD COMMANDS ─────────────────────────────
+    if (content.startsWith(PREFIX)) {
+      const [rawCmd, ...args] = content.slice(PREFIX.length).trim().split(/\s+/);
+      const cmd     = rawCmd.toLowerCase();
+      const handler = commands[cmd];
+
+      if (!handler) return;
+
+      if (!isAuthorized(userId)) {
+        return msg.reply("You're not authorized to use this bot.").catch(() => {});
+      }
+
+      try {
+        await handler(msg, args);
+      } catch (e) {
+        console.error(`[CMD:${cmd}]`, e.message);
+        msg.reply("Something broke. It wasn't me.").catch(() => {});
+      }
+      return;
+    }
+
+    // ── ACTIVE CHAT SESSION — respond to plain messages ──────────
+    const session = activeSessions.get(userId);
+    if (!session) return; // not in a session — ignore
+
+    // Only respond in the channel the session was started in
+    if (msg.channel.id !== session.channelId) return;
+
+    // Add user message to history
+    session.history.push({ role: 'user', content });
+
+    // Trim history to last MAX_HISTORY messages
+    if (session.history.length > MAX_HISTORY) {
+      session.history = session.history.slice(session.history.length - MAX_HISTORY);
+    }
+
+    const mem     = await getMemory(userId);
+    const updated = refreshMemory(mem, msg.author.username, content);
+
+    let reply;
+    try {
+      reply = await askJWithHistory(session.history, updated);
+    } catch (e) {
+      console.error('[CHAT SESSION]', e.message);
+      reply = "Something went wrong on my end. Not ideal.";
+    }
+
+    // Add J's reply to history
+    session.history.push({ role: 'assistant', content: reply });
+
+    await saveMemory(updated);
+    msg.reply(reply).catch(e => console.error('[CHAT reply]', e.message));
+
+  } catch (e) {
+    console.error('[MESSAGE HANDLER]', e.message);
+  }
 });
 
 // ════════════════════════════════════════════════════════════════════
@@ -483,15 +581,16 @@ client.on('messageCreate', async msg => {
 
 client.once('ready', () => {
   console.log(`[ONLINE] ${client.user.tag} is operational.`);
-  console.log(`[CONFIG] Cloudflare AI: ${CF_ACCOUNT_ID ? 'OK' : 'MISSING'}`);
-  console.log(`[CONFIG] Supabase:      ${SUPABASE_URL  ? 'OK' : 'MISSING'}`);
+  console.log(`[CONFIG] Cloudflare: ${CF_ACCOUNT_ID ? 'OK' : 'MISSING'}`);
+  console.log(`[CONFIG] Supabase:   ${SUPABASE_URL  ? 'OK' : 'MISSING'}`);
+  console.log(`[CONFIG] Auth gate:  ENABLED — ${authorizedUsers.size} user(s) authorized`);
 });
 
 client.on('error', e => console.error('[CLIENT ERROR]', e.message));
 process.on('unhandledRejection', e => console.error('[UNHANDLED]', e));
 
 if (!DISCORD_TOKEN) {
-  console.error('[FATAL] DISCORD_TOKEN is not set. Exiting.');
+  console.error('[FATAL] No Discord token found. Set DISCORD_TOKEN or BOT_TOKEN.');
   process.exit(1);
 }
 
