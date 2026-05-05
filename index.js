@@ -27,7 +27,6 @@ if (!DISCORD_TOKEN) {
 
 // ── STATE ─────────────────────────────────────────────────────────
 let shutUpUntil = 0;
-let authorizedUsers = new Set([OWNER_ID]);
 const chatSessions = new Map(); // userId -> { history: [] }
 const START_TIME = Date.now();
 
@@ -47,7 +46,6 @@ const client = new Client({
 const pick    = arr => arr[Math.floor(Math.random() * arr.length)];
 const isMuted = ()  => Date.now() < shutUpUntil;
 const isOwner = id  => id === OWNER_ID;
-const isAuth  = id  => authorizedUsers.has(id);
 
 function httpsPost(hostname, path, headers, bodyStr) {
   return new Promise((resolve, reject) => {
@@ -233,29 +231,6 @@ const commands = {
     await msg.reply(`Muted for ${left} more minute${left === 1 ? '' : 's'}.`);
   },
 
-  async adduser(msg) {
-    if (!isOwner(msg.author.id)) return msg.reply('No.');
-    const target = msg.mentions.users.first();
-    if (!target) return msg.reply('Usage: `>adduser @user`');
-    authorizedUsers.add(target.id);
-    await msg.reply(`✅ ${target.username} authorized.`);
-  },
-
-  async removeuser(msg) {
-    if (!isOwner(msg.author.id)) return msg.reply('No.');
-    const target = msg.mentions.users.first();
-    if (!target) return msg.reply('Usage: `>removeuser @user`');
-    if (target.id === OWNER_ID) return msg.reply("Can't remove the owner.");
-    authorizedUsers.delete(target.id);
-    await msg.reply(`❌ ${target.username} deauthorized.`);
-  },
-
-  async listusers(msg) {
-    if (!isOwner(msg.author.id)) return msg.reply('No.');
-    const ids = [...authorizedUsers].map(id => `\`${id}\``).join('\n') || 'None.';
-    await msg.reply(`**Authorized:**\n${ids}`);
-  },
-
   async roast(msg) { await msg.reply(pick(ROASTS)); },
 
   async '8ball'(msg, args) {
@@ -279,7 +254,7 @@ const commands = {
     await msg.reply(
       `**Serial Designation J** | Disassembly Unit\n` +
       `Uptime: \`${upStr}\` | Status: \`${isMuted() ? 'Muted' : 'Active'}\`\n` +
-      `Authorized: ${authorizedUsers.size} | Active sessions: ${chatSessions.size}\n` +
+      `Active sessions: ${chatSessions.size}\n` +
       `AI: Cloudflare (Llama 3.1 8B) | Memory: ${SUPABASE_URL ? 'Supabase ✅' : 'Disabled'}`
     );
   },
@@ -300,9 +275,8 @@ const commands = {
       '`?Jchat` — start a chat session with J\n' +
       '`?Jstop` — end your chat session';
     if (isOwner(msg.author.id)) {
-      text += '\n\n**Owner**\n' +
-        '`>shutup <mins>` `>unshut` `>jspeak`\n' +
-        '`>adduser @u` `>removeuser @u` `>listusers`';
+      text += '\n\n**Owner only**\n' +
+        '`>shutup <mins>` `>unshut` `>jspeak`';
     }
     await msg.reply(text);
   },
@@ -320,7 +294,6 @@ client.on('messageCreate', async msg => {
 
     // ── ?Jchat / ?Jstop ──────────────────────────────────────────
     if (content.toLowerCase() === '?jchat') {
-      if (!isAuth(userId)) return msg.reply("Not authorized.").catch(() => {});
       if (chatSessions.has(userId)) return msg.reply("Already active. Use `?Jstop` to end it.");
       chatSessions.set(userId, { history: [] });
       console.log(`[CHAT] Session started for ${msg.author.username}`);
@@ -338,11 +311,10 @@ client.on('messageCreate', async msg => {
     if (content.startsWith(PREFIX)) {
       const [rawCmd, ...args] = content.slice(PREFIX.length).trim().split(/\s+/);
       const cmd = rawCmd?.toLowerCase();
-      console.log(`[CMD] "${cmd}" — auth: ${isAuth(userId)}`);
+      console.log(`[CMD] "${cmd}"`);
 
       const handler = commands[cmd];
       if (!handler) { console.log(`[CMD] Unknown: "${cmd}"`); return; }
-      if (!isAuth(userId)) { await msg.reply("Not authorized.").catch(() => {}); return; }
 
       try { await handler(msg, args); }
       catch (e) {
