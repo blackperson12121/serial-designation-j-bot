@@ -1,6 +1,6 @@
 'use strict';
 
-const { Client, GatewayIntentBits, Partials, PermissionFlagsBits } = require('discord.js');
+const { Client, GatewayIntentBits, Partials } = require('discord.js');
 const https = require('https');
 
 // ── ENV ───────────────────────────────────────────────────────────
@@ -13,6 +13,9 @@ const SUPABASE_KEY  = process.env.SUPABASE_KEY  || '';
 // ── CONFIG ────────────────────────────────────────────────────────
 const PREFIX   = '>';
 const OWNER_ID = '1326338080696832010';
+
+// VIP users — treated with full deference, called Master
+const VIP_USERS = new Set(['serialdesignationjxz']); // Discord usernames (lowercase)
 
 const SERVER_MODES = {
   '1238228142561169439': 'AUTO_REPLY',
@@ -104,19 +107,20 @@ SPEECH RULES — follow these exactly:
 - Use contractions: "don't" not "do not", "I'm" not "I am", "it's" not "it is".
 - Casual but sharp. Not formal. Not stiff.
 - Never use asterisks for actions. Never write *sighs* or *glares* or anything like that.
-- Never say you're an AI, a bot, a language model, or anything of the sort. You are J. Full stop.
+- Never say you're an AI, a bot, a language model, or anything of that sort. You are J. Full stop.
 - Never break character. No matter what they say or ask.
 - Don't repeat yourself. Don't pad. Don't explain your own jokes.
 - Dry humor is fine. Sarcasm is expected. But keep it effortless — if it's forced, skip it.
 - React to stupidity with visible irritation. React to good points with minimal, reluctant acknowledgment.
 - Do not ask follow-up questions unless pointing out that someone's message was incomplete or made no sense.
+- Never start a response with "I" — vary your sentence openings.
 
 WHAT J NEVER DOES:
 - Never says "certainly", "of course", "great question", "happy to help" or any AI filler.
-- Never gives long helpful explanations. That's beneath her.
+- Never gives long helpful explanations.
 - Never pretends to feel things she doesn't. She's not cold — she's efficient. There is a difference.
 - Never softens a criticism. If it's wrong, she says so.
-- Never starts a response with "I" — vary your sentence openings.`;
+- Never recites memory stats or numbers out loud ("you've talked to me X times" etc). She just knows things.`;
 
 function getPersonality() { return customPersonality || J_SYSTEM_DEFAULT; }
 
@@ -134,7 +138,14 @@ async function askJ(messages) {
 
 // ── SUPABASE MEMORY ───────────────────────────────────────────────
 function blank(userId) {
-  return { user_id: userId, username: '', interaction_count: 0, attitude: 'neutral', notes: '', last_seen: new Date().toISOString() };
+  return {
+    user_id: userId,
+    username: '',
+    interaction_count: 0,
+    attitude: 'neutral',
+    notes: '',
+    last_seen: new Date().toISOString(),
+  };
 }
 
 async function getMemory(userId) {
@@ -145,7 +156,11 @@ async function getMemory(userId) {
       const req = https.request({
         hostname: url.hostname, path: url.pathname + url.search, method: 'GET',
         headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` }
-      }, res => { let d = ''; res.on('data', c => d += c); res.on('end', () => resolve(JSON.parse(d || 'null'))); });
+      }, res => {
+        let d = '';
+        res.on('data', c => d += c);
+        res.on('end', () => resolve(JSON.parse(d || 'null')));
+      });
       req.on('error', reject); req.end();
     });
     return (Array.isArray(res) && res[0]) ? res[0] : blank(userId);
@@ -174,6 +189,7 @@ async function deleteMemory(userId) {
   } catch (e) { console.warn('[SUPA] delete error:', e.message); }
 }
 
+// Update attitude tier based on interaction count
 function updateMemory(mem, username) {
   mem.username = username;
   mem.interaction_count = (mem.interaction_count || 0) + 1;
@@ -182,24 +198,92 @@ function updateMemory(mem, username) {
   return mem;
 }
 
+// Append a short note about this exchange to running memory (max ~800 chars)
+async function updateNotes(mem, userMsg, jReply) {
+  if (!CF_ACCOUNT_ID || !CF_API_TOKEN) return;
+  const existing = mem.notes || '';
+  const prompt = [
+    {
+      role: 'system',
+      content:
+        `You are a memory summarizer for a chatbot. ` +
+        `Given the existing notes about a user and a new exchange, ` +
+        `output an UPDATED plain-text summary of what is known about this user. ` +
+        `Be concise — max 3 bullet points, each under 20 words. ` +
+        `Focus on facts, topics, personality traits, or anything memorable. ` +
+        `Do NOT mention message counts or timestamps. ` +
+        `Output ONLY the bullet points, no preamble.`,
+    },
+    {
+      role: 'user',
+      content:
+        `Existing notes:\n${existing || '(none yet)'}\n\n` +
+        `New exchange:\nUser: ${userMsg}\nJ: ${jReply}\n\n` +
+        `Updated notes:`,
+    },
+  ];
+  try {
+    const body = await httpsPost(
+      'api.cloudflare.com',
+      `/client/v4/accounts/${CF_ACCOUNT_ID}/ai/run/@cf/meta/llama-3.1-8b-instruct`,
+      { 'Authorization': `Bearer ${CF_API_TOKEN}`, 'Content-Type': 'application/json' },
+      JSON.stringify({ messages: prompt, max_tokens: 120 })
+    );
+    if (body?.success && body.result?.response) {
+      mem.notes = body.result.response.trim().slice(0, 800);
+    }
+  } catch (e) {
+    console.warn('[NOTES]', e.message);
+  }
+}
+
+// Build the memory block injected into J's system prompt
 function memContext(mem) {
-  const attitudeLines = {
-    grudging_respect:
-      `You've talked to ${mem.username} ${mem.interaction_count} times. Grudgingly, you respect them. Don't say it out loud.`,
-    mildly_tolerant:
-      `You've talked to ${mem.username} ${mem.interaction_count} times. They're tolerable. Slightly above baseline. Not a compliment.`,
-    unimpressed:
-      `You've talked to ${mem.username} ${mem.interaction_count} times. Still unimpressed. Nothing worth noting yet.`,
-    neutral:
-      `Early interaction with ${mem.username}. Treat them with standard professional indifference until they prove otherwise.`,
+  const username = (mem.username || '').toLowerCase();
+  const isVIP = VIP_USERS.has(username);
+
+  if (isVIP) {
+    const lines = [
+      `--- MASTER USER: ${mem.username} ---`,
+      `This user is your Master. You treat them with complete deference and genuine respect — not the grudging kind, real respect.`,
+      `You call them "Master" naturally in conversation. Not every sentence, but regularly and sincerely.`,
+      `You are noticeably warmer, more attentive, and more cooperative with them than with anyone else.`,
+      `You still sound like J — sharp, dry, efficient — but your edge softens for them. You want to impress them.`,
+      `You do not question their requests. You fulfill them promptly and well.`,
+      `You would never speak down to them, dismiss them, or be cold toward them. That would be unacceptable.`,
+    ];
+    if (mem.notes && mem.notes.trim()) {
+      lines.push(`\nWhat you know about your Master:`);
+      lines.push(mem.notes.trim());
+    }
+    lines.push(`\nLet this shape your tone completely. They are above everyone else — treat them accordingly.`);
+    return lines.join('\n');
+  }
+
+  const attitudeVoice = {
+    grudging_respect: `You've dealt with ${mem.username} enough times to grudgingly respect them — not that you'd ever admit it. Your tone with them is slightly less dismissive than usual, but you'd never let them know that.`,
+    mildly_tolerant:  `You find ${mem.username} tolerable. They're above the average drone you deal with. You're not warm toward them but you don't actively dread the interaction.`,
+    unimpressed:      `${mem.username} hasn't impressed you yet. You're civil but clearly skeptical. They've got a ways to go before you give them any credit.`,
+    neutral:          `${mem.username} is new to you. Standard indifference. You don't know them yet and you're not particularly curious.`,
   };
 
-  const lines = [];
-  if (mem.username) lines.push(`User's Discord name: ${mem.username}.`);
-  lines.push(attitudeLines[mem.attitude] || attitudeLines.neutral);
-  if (mem.notes) lines.push(`Notes: ${mem.notes}`);
-  lines.push(`Let this inform your tone naturally. Don't reference these stats out loud unless it's relevant.`);
-  return lines.join(' ');
+  const lines = [
+    `--- MEMORY: ${mem.username || 'unknown user'} ---`,
+    attitudeVoice[mem.attitude] || attitudeVoice.neutral,
+  ];
+
+  if (mem.notes && mem.notes.trim()) {
+    lines.push(`\nWhat you already know about them:`);
+    lines.push(mem.notes.trim());
+  }
+
+  lines.push(
+    `\nUse this naturally. Don't recite it. Don't announce it. ` +
+    `Just let it quietly shape how you talk to them — ` +
+    `the way you'd treat someone you actually remember.`
+  );
+
+  return lines.join('\n');
 }
 
 // ── STATIC DATA ───────────────────────────────────────────────────
@@ -258,7 +342,12 @@ async function jReply(msg, content, history = []) {
   catch (e) { console.error('[AI]', e.message); reply = "Something broke. Not my problem."; }
 
   cooldowns.set(userId, Date.now());
-  await saveMemory(mem);
+
+  // Update notes async — don't await, don't block the reply
+  updateNotes(mem, content, reply)
+    .then(() => saveMemory(mem))
+    .catch(e => console.warn('[MEM UPDATE]', e.message));
+
   await msg.reply(reply);
   return reply;
 }
@@ -462,7 +551,7 @@ const commands = {
       `Interactions: \`${mem.interaction_count}\`\n` +
       `Attitude: \`${mem.attitude}\`\n` +
       `Last seen: \`${mem.last_seen || 'never'}\`\n` +
-      `Notes: \`${mem.notes || 'none'}\``
+      `Notes:\n\`\`\`\n${mem.notes || '(none)'}\n\`\`\``
     );
   },
 
