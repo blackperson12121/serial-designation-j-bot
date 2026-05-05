@@ -146,6 +146,23 @@ async function askJ(messages) {
   return (body.result?.response || '').trim() || 'No response.';
 }
 
+// ── VISION AI ────────────────────────────────────────────────────
+async function askJVision(imageUrl, prompt) {
+  if (!CF_ACCOUNT_ID || !CF_API_TOKEN) throw new Error('CF credentials missing');
+  // Fetch the image and convert to base64
+  const imgRes = await fetch(imageUrl);
+  const imgBuf = await imgRes.arrayBuffer();
+  const base64 = Buffer.from(imgBuf).toString('base64');
+  const body = await httpsPost(
+    'api.cloudflare.com',
+    `/client/v4/accounts/${CF_ACCOUNT_ID}/ai/run/@cf/llava-hf/llava-1.5-7b-hf`,
+    { 'Authorization': `Bearer ${CF_API_TOKEN}`, 'Content-Type': 'application/json' },
+    JSON.stringify({ image: base64, prompt: prompt || "What is in this image? Be specific.", max_tokens: 512 })
+  );
+  if (!body?.success) throw new Error(JSON.stringify(body?.errors));
+  return (body.result?.description || '').trim() || 'Could not read the image.';
+}
+
 // ── SUPABASE MEMORY ───────────────────────────────────────────────
 function blank(userId) {
   return {
@@ -379,10 +396,28 @@ async function jReply(msg, content, history = []) {
   const mem = await getMemory(userId);
   updateMemory(mem, msg.author.username);
 
+  // ── IMAGE HANDLING ──────────────────────────────────────────────
+  let imageContext = '';
+  const imageAttachment = msg.attachments?.find(a =>
+    a.contentType?.startsWith('image/') || /\.(png|jpg|jpeg|gif|webp)$/i.test(a.url)
+  );
+  if (imageAttachment) {
+    try {
+      console.log(`[VISION] Analyzing image: ${imageAttachment.url}`);
+      const description = await askJVision(imageAttachment.url, content || 'What is in this image?');
+      imageContext = `\n\n[Image attached by user. Vision analysis: ${description}]`;
+      console.log(`[VISION] Result: ${description.slice(0, 80)}`);
+    } catch (e) {
+      console.error('[VISION]', e.message);
+      imageContext = '\n\n[User attached an image but I could not process it.]';
+    }
+  }
+
   const sysMsg = { role: 'system', content: getPersonality() + '\n\n' + memContext(mem) };
+  const userContent = (content || '[Image sent with no text]') + imageContext;
   const messages = history.length
-    ? [sysMsg, ...history]
-    : [sysMsg, { role: 'user', content }];
+    ? [sysMsg, ...history, ...(imageContext ? [{ role: 'user', content: userContent }] : [])]
+    : [sysMsg, { role: 'user', content: userContent }];
 
   let reply;
   try { reply = await askJ(messages); }
@@ -634,7 +669,10 @@ client.on('messageCreate', async msg => {
   try {
     if (msg.author.bot) return;
     const content = msg.content?.trim();
-    if (!content) return;
+    const hasImage = msg.attachments?.some(a =>
+      a.contentType?.startsWith('image/') || /\.(png|jpg|jpeg|gif|webp)$/i.test(a.url)
+    );
+    if (!content && !hasImage) return;
 
     const userId  = msg.author.id;
     const guildId = msg.guild?.id || '';
