@@ -188,17 +188,22 @@ async function askJ(messages) {
 // ── VISION AI ────────────────────────────────────────────────────
 async function askJVision(imageUrl, prompt) {
   if (!CF_ACCOUNT_ID || !CF_API_TOKEN) throw new Error('CF credentials missing');
-  // Fetch the image and convert to base64
+  // Fetch image and convert to uint8 array (required by uform)
   const imgRes = await fetch(imageUrl);
+  if (!imgRes.ok) throw new Error(`Image fetch failed: ${imgRes.status}`);
   const imgBuf = await imgRes.arrayBuffer();
-  const base64 = Buffer.from(imgBuf).toString('base64');
-  const body = await httpsPost(
-    'api.cloudflare.com',
-    `/client/v4/accounts/${CF_ACCOUNT_ID}/ai/run/@cf/unum/uform-gen2-qwen-500m`,
-    { 'Authorization': `Bearer ${CF_API_TOKEN}`, 'Content-Type': 'application/json' },
-    JSON.stringify({ image: Array.from(new Uint8Array(imgBuf)), prompt: prompt || "Describe this image in detail." })
+  const uint8 = Array.from(new Uint8Array(imgBuf));
+
+  const res = await fetch(
+    `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/ai/run/@cf/unum/uform-gen2-qwen-500m`,
+    {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${CF_API_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image: uint8, prompt: prompt || 'Describe this image in detail.' })
+    }
   );
-  console.log('[VISION RAW]', JSON.stringify(body).slice(0, 200));
+  const body = await res.json();
+  console.log('[VISION RAW]', JSON.stringify(body).slice(0, 300));
   if (!body?.success) throw new Error(JSON.stringify(body?.errors));
   return (body.result?.description || body.result?.response || '').trim() || 'Could not read the image.';
 }
