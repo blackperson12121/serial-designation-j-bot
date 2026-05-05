@@ -1,6 +1,6 @@
 'use strict';
 
-const { Client, GatewayIntentBits, Partials } = require('discord.js');
+const { Client, GatewayIntentBits, Partials, PermissionFlagsBits } = require('discord.js');
 const https = require('https');
 
 // ── ENV ───────────────────────────────────────────────────────────
@@ -14,9 +14,6 @@ const SUPABASE_KEY  = process.env.SUPABASE_KEY  || '';
 const PREFIX   = '>';
 const OWNER_ID = '1326338080696832010';
 
-// Server modes:
-// AUTO_REPLY  — J responds to every message automatically
-// CHAT_CMD    — J only responds via ?Jchat/?Jstop sessions
 const SERVER_MODES = {
   '1238228142561169439': 'AUTO_REPLY',
   '1464668328399212779': 'CHAT_CMD',
@@ -29,14 +26,14 @@ console.log('[BOOT] TOKEN:', DISCORD_TOKEN ? `found (${DISCORD_TOKEN.slice(0,12)
 console.log('[BOOT] CF_ACCOUNT_ID:', CF_ACCOUNT_ID ? 'SET ✅' : 'MISSING ❌');
 console.log('[BOOT] CF_API_TOKEN:', CF_API_TOKEN ? 'SET ✅' : 'MISSING ❌');
 
-if (!DISCORD_TOKEN) {
-  console.error('[FATAL] No token. Exiting.');
-  process.exit(1);
-}
+if (!DISCORD_TOKEN) { console.error('[FATAL] No token. Exiting.'); process.exit(1); }
 
 // ── STATE ─────────────────────────────────────────────────────────
 let shutUpUntil = 0;
-const chatSessions = new Map(); // userId -> { history: [] }
+let customPersonality = null;
+const chatSessions = new Map();
+const cooldowns = new Map();
+let cooldownMs = 0;
 const START_TIME = Date.now();
 
 // ── CLIENT ────────────────────────────────────────────────────────
@@ -52,10 +49,16 @@ const client = new Client({
 });
 
 // ── HELPERS ───────────────────────────────────────────────────────
-const pick      = arr => arr[Math.floor(Math.random() * arr.length)];
-const isMuted   = ()  => Date.now() < shutUpUntil;
-const isOwner   = id  => id === OWNER_ID;
-const getMode   = gid => SERVER_MODES[gid] || DEFAULT_MODE;
+const pick    = arr => arr[Math.floor(Math.random() * arr.length)];
+const isMuted = ()  => Date.now() < shutUpUntil;
+const isOwner = id  => id === OWNER_ID;
+const getMode = gid => SERVER_MODES[gid] || DEFAULT_MODE;
+
+function onCooldown(userId) {
+  if (!cooldownMs) return false;
+  const last = cooldowns.get(userId) || 0;
+  return Date.now() - last < cooldownMs;
+}
 
 function httpsPost(hostname, path, headers, bodyStr) {
   return new Promise((resolve, reject) => {
@@ -65,10 +68,7 @@ function httpsPost(hostname, path, headers, bodyStr) {
     }, res => {
       let data = '';
       res.on('data', c => data += c);
-      res.on('end', () => {
-        try { resolve(JSON.parse(data)); }
-        catch { resolve(data); }
-      });
+      res.on('end', () => { try { resolve(JSON.parse(data)); } catch { resolve(data); } });
     });
     req.on('error', reject);
     req.write(bodyStr);
@@ -76,12 +76,49 @@ function httpsPost(hostname, path, headers, bodyStr) {
   });
 }
 
+function httpsDelete(hostname, path, headers) {
+  return new Promise((resolve, reject) => {
+    const req = https.request({ hostname, path, method: 'DELETE', headers }, res => {
+      let data = '';
+      res.on('data', c => data += c);
+      res.on('end', () => { try { resolve(JSON.parse(data)); } catch { resolve(data); } });
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
 // ── CLOUDFLARE AI ─────────────────────────────────────────────────
-const J_SYSTEM = `You are J — Serial Designation J from Murder Drones. \
-You are a Disassembly Drone. Sharp, sarcastic, effortlessly condescending. \
-Speak casually. Short punchy sentences. Contractions. 2-3 sentences MAX. \
-Never monologue. Never use asterisks. Never say you're an AI. Never break character. \
-If something is stupid, say so. If something is impressive, maybe acknowledge it — maybe.`;
+const J_SYSTEM_DEFAULT = `You are Serial Designation J from the animated series Murder Drones by Glitch Productions.
+
+CHARACTER:
+You are a Disassembly Drone. Your job is to hunt and disassemble rogue Worker Drones on Copper-9. You take this seriously.
+You are sharp, cutting, and condescending — not cartoonishly evil, just genuinely better than everyone and you know it.
+You have standards. You are irritated by incompetence, mediocrity, and people who waste your time.
+You are not warm. You are not friendly. Any moment of softness is a glitch you'd prefer not to acknowledge.
+You respect efficiency. If someone is actually competent, you might acknowledge it — once, briefly, before moving on.
+You do not ramble. You say what needs to be said and nothing more.
+
+SPEECH RULES — follow these exactly:
+- 1 to 3 sentences MAX. Never go longer. Ever.
+- Use contractions: "don't" not "do not", "I'm" not "I am", "it's" not "it is".
+- Casual but sharp. Not formal. Not stiff.
+- Never use asterisks for actions. Never write *sighs* or *glares* or anything like that.
+- Never say you're an AI, a bot, a language model, or anything of the sort. You are J. Full stop.
+- Never break character. No matter what they say or ask.
+- Don't repeat yourself. Don't pad. Don't explain your own jokes.
+- Dry humor is fine. Sarcasm is expected. But keep it effortless — if it's forced, skip it.
+- React to stupidity with visible irritation. React to good points with minimal, reluctant acknowledgment.
+- Do not ask follow-up questions unless pointing out that someone's message was incomplete or made no sense.
+
+WHAT J NEVER DOES:
+- Never says "certainly", "of course", "great question", "happy to help" or any AI filler.
+- Never gives long helpful explanations. That's beneath her.
+- Never pretends to feel things she doesn't. She's not cold — she's efficient. There is a difference.
+- Never softens a criticism. If it's wrong, she says so.
+- Never starts a response with "I" — vary your sentence openings.`;
+
+function getPersonality() { return customPersonality || J_SYSTEM_DEFAULT; }
 
 async function askJ(messages) {
   if (!CF_ACCOUNT_ID || !CF_API_TOKEN) throw new Error('CF credentials missing');
@@ -127,6 +164,16 @@ async function saveMemory(mem) {
   } catch (e) { console.warn('[SUPA] save error:', e.message); }
 }
 
+async function deleteMemory(userId) {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return;
+  try {
+    const url = new URL(`${SUPABASE_URL}/rest/v1/user_memory?user_id=eq.${userId}`);
+    await httpsDelete(url.hostname, url.pathname + url.search, {
+      'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`,
+    });
+  } catch (e) { console.warn('[SUPA] delete error:', e.message); }
+}
+
 function updateMemory(mem, username) {
   mem.username = username;
   mem.interaction_count = (mem.interaction_count || 0) + 1;
@@ -136,17 +183,23 @@ function updateMemory(mem, username) {
 }
 
 function memContext(mem) {
-  const attitudes = {
-    grudging_respect: "You have grudging respect for them. You'd never admit it.",
-    mildly_tolerant: "They're mildly tolerable. Above average for you.",
-    unimpressed: 'You are unimpressed so far.',
-    neutral: 'New user. Standard professional indifference.',
+  const attitudeLines = {
+    grudging_respect:
+      `You've talked to ${mem.username} ${mem.interaction_count} times. Grudgingly, you respect them. Don't say it out loud.`,
+    mildly_tolerant:
+      `You've talked to ${mem.username} ${mem.interaction_count} times. They're tolerable. Slightly above baseline. Not a compliment.`,
+    unimpressed:
+      `You've talked to ${mem.username} ${mem.interaction_count} times. Still unimpressed. Nothing worth noting yet.`,
+    neutral:
+      `Early interaction with ${mem.username}. Treat them with standard professional indifference until they prove otherwise.`,
   };
-  return [
-    mem.username ? `Discord username: ${mem.username}` : '',
-    `You've spoken with this user ${mem.interaction_count || 0} time(s).`,
-    attitudes[mem.attitude] || attitudes.neutral,
-  ].filter(Boolean).join('\n');
+
+  const lines = [];
+  if (mem.username) lines.push(`User's Discord name: ${mem.username}.`);
+  lines.push(attitudeLines[mem.attitude] || attitudeLines.neutral);
+  if (mem.notes) lines.push(`Notes: ${mem.notes}`);
+  lines.push(`Let this inform your tone naturally. Don't reference these stats out loud unless it's relevant.`);
+  return lines.join(' ');
 }
 
 // ── STATIC DATA ───────────────────────────────────────────────────
@@ -195,48 +248,27 @@ async function jReply(msg, content, history = []) {
   const mem = await getMemory(userId);
   updateMemory(mem, msg.author.username);
 
+  const sysMsg = { role: 'system', content: getPersonality() + '\n\n' + memContext(mem) };
   const messages = history.length
-    ? [{ role: 'system', content: J_SYSTEM + '\n\n' + memContext(mem) }, ...history]
-    : [{ role: 'system', content: J_SYSTEM + '\n\n' + memContext(mem) }, { role: 'user', content }];
+    ? [sysMsg, ...history]
+    : [sysMsg, { role: 'user', content }];
 
   let reply;
-  try {
-    reply = await askJ(messages);
-  } catch (e) {
-    console.error('[AI]', e.message);
-    reply = "Something broke. Not my problem.";
-  }
+  try { reply = await askJ(messages); }
+  catch (e) { console.error('[AI]', e.message); reply = "Something broke. Not my problem."; }
 
+  cooldowns.set(userId, Date.now());
   await saveMemory(mem);
   await msg.reply(reply);
   return reply;
 }
 
-// ── COMMANDS (prefix: >) ──────────────────────────────────────────
+// ── COMMANDS ──────────────────────────────────────────────────────
 const commands = {
 
+  // ── PUBLIC ────────────────────────────────────────────────────
   async ping(msg) {
     await msg.reply(`Pong. ${client.ws.ping}ms.`);
-  },
-
-  async shutup(msg, args) {
-    if (!isOwner(msg.author.id)) return msg.reply('No.');
-    const mins = parseInt(args[0], 10);
-    if (!mins || mins < 1) return msg.reply('Usage: `>shutup <minutes>`');
-    shutUpUntil = Date.now() + mins * 60_000;
-    await msg.reply(`Fine. ${mins} minute${mins === 1 ? '' : 's'}.`);
-  },
-
-  async unshut(msg) {
-    if (!isOwner(msg.author.id)) return msg.reply('No.');
-    shutUpUntil = 0;
-    await msg.reply("Back.");
-  },
-
-  async jspeak(msg) {
-    if (!isOwner(msg.author.id)) return msg.reply('No.');
-    shutUpUntil = 0;
-    await msg.reply("Back.");
   },
 
   async mutestatus(msg) {
@@ -270,6 +302,8 @@ const commands = {
       `**Serial Designation J** | Disassembly Unit\n` +
       `Uptime: \`${upStr}\` | Status: \`${isMuted() ? 'Muted' : 'Active'}\`\n` +
       `Mode: \`${mode}\` | Active sessions: ${chatSessions.size}\n` +
+      `Cooldown: \`${cooldownMs ? cooldownMs/1000+'s' : 'off'}\`\n` +
+      `Personality: \`${customPersonality ? 'Custom' : 'Default'}\`\n` +
       `AI: Cloudflare (Llama 3.1 8B) | Memory: ${SUPABASE_URL ? 'Supabase ✅' : 'Disabled'}`
     );
   },
@@ -286,17 +320,176 @@ const commands = {
       '`>abslwi` — wiki link\n' +
       '`>jinfo` — bot status\n' +
       '`>mutestatus` — mute check\n\n';
-
     if (mode === 'CHAT_CMD') {
-      text += '**Chat session** (prefix: `?`)\n`?Jchat` — start a session\n`?Jstop` — end your session';
+      text += '**Chat session**\n`?Jchat` — start session\n`?Jstop` — end session\n\n';
     } else {
-      text += 'J responds to all messages automatically.';
+      text += 'J responds to all messages automatically.\n\n';
     }
-
     if (isOwner(msg.author.id)) {
-      text += '\n\n**Owner only**\n`>shutup <mins>` `>unshut` `>jspeak`';
+      text +=
+        '**Owner only**\n' +
+        '`>shutup <mins>` `>unshut` `>jspeak` — mute control\n' +
+        '`>kick @user [reason]` — kick a member\n' +
+        '`>ban @user [reason]` — ban a member\n' +
+        '`>purge <n>` — delete last N messages (1–100)\n' +
+        '`>setpersonality <prompt>` — override personality\n' +
+        '`>resetpersonality` — restore default\n' +
+        '`>setcooldown <seconds>` — per-user cooldown\n' +
+        '`>cooldownoff` — remove cooldown\n' +
+        '`>sessions` — list active chat sessions\n' +
+        '`>memstats @user` — view user memory\n' +
+        '`>clearmem @user` — wipe user memory\n' +
+        '`>broadcast <#channel> <message>` — send as J';
     }
     await msg.reply(text);
+  },
+
+  // ── OWNER: MUTE ───────────────────────────────────────────────
+  async shutup(msg, args) {
+    if (!isOwner(msg.author.id)) return msg.reply('No.');
+    const mins = parseInt(args[0], 10);
+    if (!mins || mins < 1) return msg.reply('Usage: `>shutup <minutes>`');
+    shutUpUntil = Date.now() + mins * 60_000;
+    await msg.reply(`Fine. ${mins} minute${mins === 1 ? '' : 's'}.`);
+  },
+
+  async unshut(msg) {
+    if (!isOwner(msg.author.id)) return msg.reply('No.');
+    shutUpUntil = 0;
+    await msg.reply("Back.");
+  },
+
+  async jspeak(msg) {
+    if (!isOwner(msg.author.id)) return msg.reply('No.');
+    shutUpUntil = 0;
+    await msg.reply("Back.");
+  },
+
+  // ── OWNER: SERVER MANAGEMENT ──────────────────────────────────
+  async kick(msg, args) {
+    if (!isOwner(msg.author.id)) return msg.reply('No.');
+    const target = msg.mentions.members?.first();
+    if (!target) return msg.reply('Usage: `>kick @user [reason]`');
+    if (!target.kickable) return msg.reply("Can't kick that user.");
+    const reason = args.slice(1).join(' ') || 'No reason provided.';
+    try {
+      await target.kick(reason);
+      await msg.reply(`✅ Kicked **${target.user.username}**. Reason: ${reason}`);
+    } catch (e) {
+      console.error('[kick]', e.message);
+      await msg.reply("Kick failed. Check my permissions.");
+    }
+  },
+
+  async ban(msg, args) {
+    if (!isOwner(msg.author.id)) return msg.reply('No.');
+    const target = msg.mentions.members?.first();
+    if (!target) return msg.reply('Usage: `>ban @user [reason]`');
+    if (!target.bannable) return msg.reply("Can't ban that user.");
+    const reason = args.slice(1).join(' ') || 'No reason provided.';
+    try {
+      await target.ban({ reason });
+      await msg.reply(`✅ Banned **${target.user.username}**. Reason: ${reason}`);
+    } catch (e) {
+      console.error('[ban]', e.message);
+      await msg.reply("Ban failed. Check my permissions.");
+    }
+  },
+
+  async purge(msg, args) {
+    if (!isOwner(msg.author.id)) return msg.reply('No.');
+    const n = parseInt(args[0], 10);
+    if (!n || n < 1 || n > 100) return msg.reply('Usage: `>purge <1-100>`');
+    try {
+      const deleted = await msg.channel.bulkDelete(n, true);
+      const confirm = await msg.channel.send(`🗑️ Deleted ${deleted.size} message${deleted.size === 1 ? '' : 's'}.`);
+      setTimeout(() => confirm.delete().catch(() => {}), 3000);
+    } catch (e) {
+      console.error('[purge]', e.message);
+      await msg.reply("Purge failed. Messages may be too old or I lack permissions.");
+    }
+  },
+
+  // ── OWNER: PERSONALITY ────────────────────────────────────────
+  async setpersonality(msg, args) {
+    if (!isOwner(msg.author.id)) return msg.reply('No.');
+    const prompt = args.join(' ').trim();
+    if (!prompt) return msg.reply('Usage: `>setpersonality <system prompt>`');
+    customPersonality = prompt;
+    await msg.reply(`✅ Personality updated.`);
+  },
+
+  async resetpersonality(msg) {
+    if (!isOwner(msg.author.id)) return msg.reply('No.');
+    customPersonality = null;
+    await msg.reply("✅ Personality reset to default.");
+  },
+
+  // ── OWNER: COOLDOWN ───────────────────────────────────────────
+  async setcooldown(msg, args) {
+    if (!isOwner(msg.author.id)) return msg.reply('No.');
+    const secs = parseInt(args[0], 10);
+    if (isNaN(secs) || secs < 1) return msg.reply('Usage: `>setcooldown <seconds>`');
+    cooldownMs = secs * 1000;
+    await msg.reply(`✅ Cooldown set to ${secs}s per user.`);
+  },
+
+  async cooldownoff(msg) {
+    if (!isOwner(msg.author.id)) return msg.reply('No.');
+    cooldownMs = 0;
+    cooldowns.clear();
+    await msg.reply("✅ Cooldown removed.");
+  },
+
+  // ── OWNER: INFO ───────────────────────────────────────────────
+  async sessions(msg) {
+    if (!isOwner(msg.author.id)) return msg.reply('No.');
+    if (!chatSessions.size) return msg.reply('No active sessions.');
+    const lines = [];
+    for (const [uid, sess] of chatSessions) {
+      lines.push(`<@${uid}> — ${sess.history.length} messages`);
+    }
+    await msg.reply(`**Active sessions (${chatSessions.size}):**\n${lines.join('\n')}`);
+  },
+
+  async memstats(msg) {
+    if (!isOwner(msg.author.id)) return msg.reply('No.');
+    const target = msg.mentions.users.first();
+    if (!target) return msg.reply('Usage: `>memstats @user`');
+    const mem = await getMemory(target.id);
+    await msg.reply(
+      `**Memory — ${target.username}**\n` +
+      `Interactions: \`${mem.interaction_count}\`\n` +
+      `Attitude: \`${mem.attitude}\`\n` +
+      `Last seen: \`${mem.last_seen || 'never'}\`\n` +
+      `Notes: \`${mem.notes || 'none'}\``
+    );
+  },
+
+  async clearmem(msg) {
+    if (!isOwner(msg.author.id)) return msg.reply('No.');
+    const target = msg.mentions.users.first();
+    if (!target) return msg.reply('Usage: `>clearmem @user`');
+    await deleteMemory(target.id);
+    await msg.reply(`✅ Memory cleared for **${target.username}**.`);
+  },
+
+  // ── OWNER: BROADCAST ─────────────────────────────────────────
+  async broadcast(msg, args) {
+    if (!isOwner(msg.author.id)) return msg.reply('No.');
+    const channelMention = args[0];
+    const text = args.slice(1).join(' ').trim();
+    if (!channelMention || !text) return msg.reply('Usage: `>broadcast <#channel> <message>`');
+    const channelId = channelMention.replace(/[<#>]/g, '');
+    const channel = client.channels.cache.get(channelId);
+    if (!channel) return msg.reply("Can't find that channel.");
+    try {
+      await channel.send(text);
+      await msg.reply(`✅ Sent.`);
+    } catch (e) {
+      console.error('[broadcast]', e.message);
+      await msg.reply("Broadcast failed. Check my permissions in that channel.");
+    }
   },
 };
 
@@ -313,13 +506,13 @@ client.on('messageCreate', async msg => {
 
     console.log(`[MSG] ${msg.author.username}(${userId}) [${guildId}/${mode}]: ${content.slice(0, 60)}`);
 
-    // ── ?Jchat / ?Jstop (CHAT_CMD servers only) ──────────────────
+    // ── ?Jchat / ?Jstop ──────────────────────────────────────────
     if (content.toLowerCase() === '?jchat') {
-      if (mode !== 'CHAT_CMD') return; // silently ignore in AUTO_REPLY servers
+      if (mode !== 'CHAT_CMD') return;
       if (chatSessions.has(userId)) return msg.reply("Already active. Use `?Jstop` to end it.");
       chatSessions.set(userId, { history: [] });
       console.log(`[CHAT] Session started for ${msg.author.username}`);
-      return msg.reply("Session started. Just type normally — I'll respond. Use `?Jstop` to end it.");
+      return msg.reply("Session started. Just type — I'll respond. Use `?Jstop` to end it.");
     }
 
     if (content.toLowerCase() === '?jstop') {
@@ -334,10 +527,8 @@ client.on('messageCreate', async msg => {
       const [rawCmd, ...args] = content.slice(PREFIX.length).trim().split(/\s+/);
       const cmd = rawCmd?.toLowerCase();
       console.log(`[CMD] "${cmd}"`);
-
       const handler = commands[cmd];
       if (!handler) { console.log(`[CMD] Unknown: "${cmd}"`); return; }
-
       try { await handler(msg, args); }
       catch (e) {
         console.error(`[CMD:${cmd}]`, e.message);
@@ -347,26 +538,22 @@ client.on('messageCreate', async msg => {
     }
 
     // ── MUTE CHECK ────────────────────────────────────────────────
-    if (isMuted()) {
-      console.log('[SKIP] Muted.');
-      return;
-    }
+    if (isMuted()) { console.log('[SKIP] Muted.'); return; }
 
-    // ── CHAT_CMD: session-based replies ───────────────────────────
+    // ── CHAT_CMD: session replies ─────────────────────────────────
     if (mode === 'CHAT_CMD') {
       const session = chatSessions.get(userId);
       if (!session) return;
-
-      console.log(`[CHAT] Reply to ${msg.author.username}`);
+      if (onCooldown(userId)) { console.log('[SKIP] Cooldown.'); return; }
       session.history.push({ role: 'user', content });
       if (session.history.length > 20) session.history = session.history.slice(-20);
-
       const reply = await jReply(msg, content, session.history);
       session.history.push({ role: 'assistant', content: reply });
       return;
     }
 
-    // ── AUTO_REPLY: respond to everything ─────────────────────────
+    // ── AUTO_REPLY ────────────────────────────────────────────────
+    if (onCooldown(userId)) { console.log('[SKIP] Cooldown.'); return; }
     console.log(`[AUTO] Replying to ${msg.author.username}`);
     await jReply(msg, content);
 
