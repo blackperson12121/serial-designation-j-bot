@@ -155,12 +155,13 @@ async function askJVision(imageUrl, prompt) {
   const base64 = Buffer.from(imgBuf).toString('base64');
   const body = await httpsPost(
     'api.cloudflare.com',
-    `/client/v4/accounts/${CF_ACCOUNT_ID}/ai/run/@cf/llava-hf/llava-1.5-7b-hf`,
+    `/client/v4/accounts/${CF_ACCOUNT_ID}/ai/run/@cf/unum/uform-gen2-qwen-500m`,
     { 'Authorization': `Bearer ${CF_API_TOKEN}`, 'Content-Type': 'application/json' },
-    JSON.stringify({ image: base64, prompt: prompt || "What is in this image? Be specific.", max_tokens: 512 })
+    JSON.stringify({ image: Array.from(new Uint8Array(imgBuf)), prompt: prompt || "Describe this image in detail." })
   );
+  console.log('[VISION RAW]', JSON.stringify(body).slice(0, 200));
   if (!body?.success) throw new Error(JSON.stringify(body?.errors));
-  return (body.result?.description || '').trim() || 'Could not read the image.';
+  return (body.result?.description || body.result?.response || '').trim() || 'Could not read the image.';
 }
 
 // ── SUPABASE MEMORY ───────────────────────────────────────────────
