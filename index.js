@@ -14,6 +14,15 @@ const SUPABASE_KEY  = process.env.SUPABASE_KEY  || '';
 const PREFIX   = '>';
 const OWNER_ID = '1326338080696832010';
 
+// Server modes:
+// AUTO_REPLY  — J responds to every message automatically
+// CHAT_CMD    — J only responds via ?Jchat/?Jstop sessions
+const SERVER_MODES = {
+  '1238228142561169439': 'AUTO_REPLY',
+  '1464668328399212779': 'CHAT_CMD',
+};
+const DEFAULT_MODE = 'AUTO_REPLY';
+
 // ── VALIDATE ─────────────────────────────────────────────────────
 console.log('[BOOT] Starting Serial Designation J...');
 console.log('[BOOT] TOKEN:', DISCORD_TOKEN ? `found (${DISCORD_TOKEN.slice(0,12)}...)` : 'MISSING ❌');
@@ -43,9 +52,10 @@ const client = new Client({
 });
 
 // ── HELPERS ───────────────────────────────────────────────────────
-const pick    = arr => arr[Math.floor(Math.random() * arr.length)];
-const isMuted = ()  => Date.now() < shutUpUntil;
-const isOwner = id  => id === OWNER_ID;
+const pick      = arr => arr[Math.floor(Math.random() * arr.length)];
+const isMuted   = ()  => Date.now() < shutUpUntil;
+const isOwner   = id  => id === OWNER_ID;
+const getMode   = gid => SERVER_MODES[gid] || DEFAULT_MODE;
 
 function httpsPost(hostname, path, headers, bodyStr) {
   return new Promise((resolve, reject) => {
@@ -179,30 +189,34 @@ const FACTS = [
   'Uzi Doorman is a Worker Drone with unusual access to the Absolute Solver.',
 ];
 
+// ── SHARED AI REPLY ───────────────────────────────────────────────
+async function jReply(msg, content, history = []) {
+  const userId = msg.author.id;
+  const mem = await getMemory(userId);
+  updateMemory(mem, msg.author.username);
+
+  const messages = history.length
+    ? [{ role: 'system', content: J_SYSTEM + '\n\n' + memContext(mem) }, ...history]
+    : [{ role: 'system', content: J_SYSTEM + '\n\n' + memContext(mem) }, { role: 'user', content }];
+
+  let reply;
+  try {
+    reply = await askJ(messages);
+  } catch (e) {
+    console.error('[AI]', e.message);
+    reply = "Something broke. Not my problem.";
+  }
+
+  await saveMemory(mem);
+  await msg.reply(reply);
+  return reply;
+}
+
 // ── COMMANDS (prefix: >) ──────────────────────────────────────────
 const commands = {
 
   async ping(msg) {
     await msg.reply(`Pong. ${client.ws.ping}ms.`);
-  },
-
-  async j(msg, args) {
-    const prompt = args.join(' ').trim();
-    if (!prompt) return msg.reply("Say something. I can't respond to silence.");
-    const mem = await getMemory(msg.author.id);
-    updateMemory(mem, msg.author.username);
-    let reply;
-    try {
-      reply = await askJ([
-        { role: 'system', content: J_SYSTEM + '\n\n' + memContext(mem) },
-        { role: 'user', content: prompt },
-      ]);
-    } catch (e) {
-      console.error('[CMD:j]', e.message);
-      reply = "Cloudflare is being uncooperative. Not my fault.";
-    }
-    await saveMemory(mem);
-    await msg.reply(reply);
   },
 
   async shutup(msg, args) {
@@ -251,32 +265,36 @@ const commands = {
     const m = Math.floor((upSec % 3600) / 60);
     const s = upSec % 60;
     const upStr = h > 0 ? `${h}h ${m}m` : m > 0 ? `${m}m ${s}s` : `${s}s`;
+    const mode = getMode(msg.guild?.id);
     await msg.reply(
       `**Serial Designation J** | Disassembly Unit\n` +
       `Uptime: \`${upStr}\` | Status: \`${isMuted() ? 'Muted' : 'Active'}\`\n` +
-      `Active sessions: ${chatSessions.size}\n` +
+      `Mode: \`${mode}\` | Active sessions: ${chatSessions.size}\n` +
       `AI: Cloudflare (Llama 3.1 8B) | Memory: ${SUPABASE_URL ? 'Supabase ✅' : 'Disabled'}`
     );
   },
 
   async help(msg) {
+    const mode = getMode(msg.guild?.id);
     let text =
       '**Commands** (prefix: `>`)\n' +
       '`>ping` — latency\n' +
-      '`>j <msg>` — talk to J (single message)\n' +
       '`>roast` — get roasted\n' +
       '`>8ball <q>` — magic 8-ball\n' +
       '`>quote` — Murder Drones quote\n' +
       '`>fact` — Murder Drones fact\n' +
       '`>abslwi` — wiki link\n' +
       '`>jinfo` — bot status\n' +
-      '`>mutestatus` — mute check\n\n' +
-      '**Chat session** (prefix: `?`)\n' +
-      '`?Jchat` — start a chat session with J\n' +
-      '`?Jstop` — end your chat session';
+      '`>mutestatus` — mute check\n\n';
+
+    if (mode === 'CHAT_CMD') {
+      text += '**Chat session** (prefix: `?`)\n`?Jchat` — start a session\n`?Jstop` — end your session';
+    } else {
+      text += 'J responds to all messages automatically.';
+    }
+
     if (isOwner(msg.author.id)) {
-      text += '\n\n**Owner only**\n' +
-        '`>shutup <mins>` `>unshut` `>jspeak`';
+      text += '\n\n**Owner only**\n`>shutup <mins>` `>unshut` `>jspeak`';
     }
     await msg.reply(text);
   },
@@ -289,11 +307,15 @@ client.on('messageCreate', async msg => {
     const content = msg.content?.trim();
     if (!content) return;
 
-    const userId = msg.author.id;
-    console.log(`[MSG] ${msg.author.username}(${userId}): ${content.slice(0, 60)}`);
+    const userId  = msg.author.id;
+    const guildId = msg.guild?.id || '';
+    const mode    = getMode(guildId);
 
-    // ── ?Jchat / ?Jstop ──────────────────────────────────────────
+    console.log(`[MSG] ${msg.author.username}(${userId}) [${guildId}/${mode}]: ${content.slice(0, 60)}`);
+
+    // ── ?Jchat / ?Jstop (CHAT_CMD servers only) ──────────────────
     if (content.toLowerCase() === '?jchat') {
+      if (mode !== 'CHAT_CMD') return; // silently ignore in AUTO_REPLY servers
       if (chatSessions.has(userId)) return msg.reply("Already active. Use `?Jstop` to end it.");
       chatSessions.set(userId, { history: [] });
       console.log(`[CHAT] Session started for ${msg.author.username}`);
@@ -324,32 +346,29 @@ client.on('messageCreate', async msg => {
       return;
     }
 
-    // ── ACTIVE CHAT SESSION ───────────────────────────────────────
-    const session = chatSessions.get(userId);
-    if (!session) return;
-
-    console.log(`[CHAT] Message from ${msg.author.username} in active session`);
-
-    session.history.push({ role: 'user', content });
-    if (session.history.length > 20) session.history = session.history.slice(-20);
-
-    const mem = await getMemory(userId);
-    updateMemory(mem, msg.author.username);
-
-    let reply;
-    try {
-      reply = await askJ([
-        { role: 'system', content: J_SYSTEM + '\n\n' + memContext(mem) },
-        ...session.history,
-      ]);
-    } catch (e) {
-      console.error('[CHAT]', e.message);
-      reply = "Something went wrong on my end. Not ideal.";
+    // ── MUTE CHECK ────────────────────────────────────────────────
+    if (isMuted()) {
+      console.log('[SKIP] Muted.');
+      return;
     }
 
-    session.history.push({ role: 'assistant', content: reply });
-    await saveMemory(mem);
-    await msg.reply(reply);
+    // ── CHAT_CMD: session-based replies ───────────────────────────
+    if (mode === 'CHAT_CMD') {
+      const session = chatSessions.get(userId);
+      if (!session) return;
+
+      console.log(`[CHAT] Reply to ${msg.author.username}`);
+      session.history.push({ role: 'user', content });
+      if (session.history.length > 20) session.history = session.history.slice(-20);
+
+      const reply = await jReply(msg, content, session.history);
+      session.history.push({ role: 'assistant', content: reply });
+      return;
+    }
+
+    // ── AUTO_REPLY: respond to everything ─────────────────────────
+    console.log(`[AUTO] Replying to ${msg.author.username}`);
+    await jReply(msg, content);
 
   } catch (e) {
     console.error('[MSG HANDLER]', e.message);
@@ -361,6 +380,7 @@ client.once('clientReady', c => {
   console.log(`[ONLINE] ${c.user.tag} is operational.`);
   console.log(`[CONFIG] Prefix: "${PREFIX}" | Owner: ${OWNER_ID}`);
   console.log(`[CONFIG] CF: ${CF_ACCOUNT_ID ? 'OK' : 'MISSING'} | Supabase: ${SUPABASE_URL ? 'OK' : 'disabled'}`);
+  console.log(`[CONFIG] Server modes:`, SERVER_MODES);
 });
 
 client.on('warn',  w => console.warn('[WARN]', w));
