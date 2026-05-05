@@ -28,7 +28,7 @@ if (!DISCORD_TOKEN) {
 // ── STATE ─────────────────────────────────────────────────────────
 let shutUpUntil = 0;
 let authorizedUsers = new Set([OWNER_ID]);
-const chatSessions = new Map();
+const chatSessions = new Map(); // userId -> { history: [] }
 const START_TIME = Date.now();
 
 // ── CLIENT ────────────────────────────────────────────────────────
@@ -97,7 +97,8 @@ async function getMemory(userId) {
   try {
     const url = new URL(`${SUPABASE_URL}/rest/v1/user_memory?user_id=eq.${userId}`);
     const res = await new Promise((resolve, reject) => {
-      const req = https.request({ hostname: url.hostname, path: url.pathname + url.search, method: 'GET',
+      const req = https.request({
+        hostname: url.hostname, path: url.pathname + url.search, method: 'GET',
         headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` }
       }, res => { let d = ''; res.on('data', c => d += c); res.on('end', () => resolve(JSON.parse(d || 'null'))); });
       req.on('error', reject); req.end();
@@ -118,7 +119,7 @@ async function saveMemory(mem) {
   } catch (e) { console.warn('[SUPA] save error:', e.message); }
 }
 
-function updateMemory(mem, username, text) {
+function updateMemory(mem, username) {
   mem.username = username;
   mem.interaction_count = (mem.interaction_count || 0) + 1;
   const c = mem.interaction_count;
@@ -180,7 +181,7 @@ const FACTS = [
   'Uzi Doorman is a Worker Drone with unusual access to the Absolute Solver.',
 ];
 
-// ── COMMAND HANDLERS ──────────────────────────────────────────────
+// ── COMMANDS (prefix: >) ──────────────────────────────────────────
 const commands = {
 
   async ping(msg) {
@@ -191,7 +192,7 @@ const commands = {
     const prompt = args.join(' ').trim();
     if (!prompt) return msg.reply("Say something. I can't respond to silence.");
     const mem = await getMemory(msg.author.id);
-    updateMemory(mem, msg.author.username, prompt);
+    updateMemory(mem, msg.author.username);
     let reply;
     try {
       reply = await askJ([
@@ -204,18 +205,6 @@ const commands = {
     }
     await saveMemory(mem);
     await msg.reply(reply);
-  },
-
-  async jchat(msg) {
-    if (chatSessions.has(msg.author.id)) return msg.reply("Already active. Use `>jstop` to end it.");
-    chatSessions.set(msg.author.id, { channelId: msg.channel.id, history: [] });
-    await msg.reply("Session started. Just type. Use `>jstop` to end it.");
-  },
-
-  async jstop(msg) {
-    if (!chatSessions.has(msg.author.id)) return msg.reply("No active session.");
-    chatSessions.delete(msg.author.id);
-    await msg.reply("Session ended.");
   },
 
   async shutup(msg, args) {
@@ -290,7 +279,7 @@ const commands = {
     await msg.reply(
       `**Serial Designation J** | Disassembly Unit\n` +
       `Uptime: \`${upStr}\` | Status: \`${isMuted() ? 'Muted' : 'Active'}\`\n` +
-      `Authorized: ${authorizedUsers.size} | Sessions: ${chatSessions.size}\n` +
+      `Authorized: ${authorizedUsers.size} | Active sessions: ${chatSessions.size}\n` +
       `AI: Cloudflare (Llama 3.1 8B) | Memory: ${SUPABASE_URL ? 'Supabase ✅' : 'Disabled'}`
     );
   },
@@ -299,16 +288,17 @@ const commands = {
     let text =
       '**Commands** (prefix: `>`)\n' +
       '`>ping` — latency\n' +
-      '`>j <msg>` — talk to J\n' +
-      '`>jchat` — start chat session\n' +
-      '`>jstop` — end chat session\n' +
+      '`>j <msg>` — talk to J (single message)\n' +
       '`>roast` — get roasted\n' +
       '`>8ball <q>` — magic 8-ball\n' +
       '`>quote` — Murder Drones quote\n' +
       '`>fact` — Murder Drones fact\n' +
       '`>abslwi` — wiki link\n' +
       '`>jinfo` — bot status\n' +
-      '`>mutestatus` — mute check';
+      '`>mutestatus` — mute check\n\n' +
+      '**Chat session** (prefix: `?`)\n' +
+      '`?Jchat` — start a chat session with J\n' +
+      '`?Jstop` — end your chat session';
     if (isOwner(msg.author.id)) {
       text += '\n\n**Owner**\n' +
         '`>shutup <mins>` `>unshut` `>jspeak`\n' +
@@ -328,7 +318,23 @@ client.on('messageCreate', async msg => {
     const userId = msg.author.id;
     console.log(`[MSG] ${msg.author.username}(${userId}): ${content.slice(0, 60)}`);
 
-    // ── PREFIX COMMANDS ───────────────────────────────────────────
+    // ── ?Jchat / ?Jstop ──────────────────────────────────────────
+    if (content.toLowerCase() === '?jchat') {
+      if (!isAuth(userId)) return msg.reply("Not authorized.").catch(() => {});
+      if (chatSessions.has(userId)) return msg.reply("Already active. Use `?Jstop` to end it.");
+      chatSessions.set(userId, { history: [] });
+      console.log(`[CHAT] Session started for ${msg.author.username}`);
+      return msg.reply("Session started. Just type normally — I'll respond. Use `?Jstop` to end it.");
+    }
+
+    if (content.toLowerCase() === '?jstop') {
+      if (!chatSessions.has(userId)) return msg.reply("No active session.");
+      chatSessions.delete(userId);
+      console.log(`[CHAT] Session ended for ${msg.author.username}`);
+      return msg.reply("Session ended.");
+    }
+
+    // ── > PREFIX COMMANDS ─────────────────────────────────────────
     if (content.startsWith(PREFIX)) {
       const [rawCmd, ...args] = content.slice(PREFIX.length).trim().split(/\s+/);
       const cmd = rawCmd?.toLowerCase();
@@ -339,19 +345,24 @@ client.on('messageCreate', async msg => {
       if (!isAuth(userId)) { await msg.reply("Not authorized.").catch(() => {}); return; }
 
       try { await handler(msg, args); }
-      catch (e) { console.error(`[CMD:${cmd}]`, e.message); await msg.reply("Something broke.").catch(() => {}); }
+      catch (e) {
+        console.error(`[CMD:${cmd}]`, e.message);
+        await msg.reply("Something broke.").catch(() => {});
+      }
       return;
     }
 
     // ── ACTIVE CHAT SESSION ───────────────────────────────────────
     const session = chatSessions.get(userId);
-    if (!session || msg.channel.id !== session.channelId) return;
+    if (!session) return;
+
+    console.log(`[CHAT] Message from ${msg.author.username} in active session`);
 
     session.history.push({ role: 'user', content });
     if (session.history.length > 20) session.history = session.history.slice(-20);
 
     const mem = await getMemory(userId);
-    updateMemory(mem, msg.author.username, content);
+    updateMemory(mem, msg.author.username);
 
     let reply;
     try {
@@ -361,7 +372,7 @@ client.on('messageCreate', async msg => {
       ]);
     } catch (e) {
       console.error('[CHAT]', e.message);
-      reply = "Something went wrong. Not ideal.";
+      reply = "Something went wrong on my end. Not ideal.";
     }
 
     session.history.push({ role: 'assistant', content: reply });
