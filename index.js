@@ -299,12 +299,15 @@ async function updateNotes(mem, userMsg, jReply) {
     },
   ];
   try {
-    const body = await httpsPost(
-      'api.cloudflare.com',
-      `/client/v4/accounts/${CF_ACCOUNT_ID}/ai/run/@cf/meta/llama-3.1-8b-instruct`,
-      { 'Authorization': `Bearer ${CF_API_TOKEN}`, 'Content-Type': 'application/json' },
-      JSON.stringify({ messages: prompt, max_tokens: 120 })
+    const notesRes = await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/ai/run/@cf/meta/llama-3.1-8b-instruct`,
+      {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${CF_API_TOKEN}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: prompt, max_tokens: 120 })
+      }
     );
+    const body = await notesRes.json();
     if (body?.success && body.result?.response) {
       mem.notes = body.result.response.trim().slice(0, 800);
     }
@@ -464,9 +467,7 @@ async function jReply(msg, content, history = []) {
 
   const sysMsg = { role: 'system', content: getPersonality() + '\n\n' + memContext(mem) };
   const userContent = (content || '[Image sent with no text]') + imageContext;
-  const messages = history.length
-    ? [sysMsg, ...history, ...(imageContext ? [{ role: 'user', content: userContent }] : [])]
-    : [sysMsg, { role: 'user', content: userContent }];
+  const messages = [sysMsg, ...history, { role: 'user', content: userContent }];
 
   let reply;
   try { reply = await askJ(messages); }
