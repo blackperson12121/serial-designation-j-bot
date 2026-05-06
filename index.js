@@ -175,12 +175,16 @@ function getPersonality() { return customPersonality || J_SYSTEM_DEFAULT; }
 
 async function askJ(messages) {
   if (!CF_ACCOUNT_ID || !CF_API_TOKEN) throw new Error('CF credentials missing');
-  const body = await httpsPost(
-    'api.cloudflare.com',
-    `/client/v4/accounts/${CF_ACCOUNT_ID}/ai/run/@cf/meta/llama-3.1-8b-instruct`,
-    { 'Authorization': `Bearer ${CF_API_TOKEN}`, 'Content-Type': 'application/json' },
-    JSON.stringify({ messages })
+  const res = await fetch(
+    `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/ai/run/@cf/meta/llama-3.1-8b-instruct`,
+    {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${CF_API_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages })
+    }
   );
+  const body = await res.json();
+  console.log('[AI RAW]', JSON.stringify(body).slice(0, 200));
   if (!body?.success) throw new Error(JSON.stringify(body?.errors));
   return (body.result?.response || '').trim() || 'No response.';
 }
