@@ -728,10 +728,10 @@ client.on('messageCreate', async msg => {
     const guildId = msg.guild?.id || '';
     const mode    = getMode(guildId);
 
-    console.log(`[MSG] ${msg.author.username}(${userId}) [${guildId}/${mode}]: ${content.slice(0, 60)}`);
+    console.log(`[MSG] ${msg.author.username}(${userId}) [${guildId}/${mode}]: ${(content || "").slice(0, 60)}`);
 
     // ── ?Jchat / ?Jstop ──────────────────────────────────────────
-    if (content.toLowerCase() === '?jchat') {
+    if ((content || '').toLowerCase() === '?jchat') {
       if (mode !== 'CHAT_CMD') return;
       if (chatSessions.has(userId)) return msg.reply("Already active. Use `?Jstop` to end it.");
       chatSessions.set(userId, { history: [] });
@@ -739,7 +739,7 @@ client.on('messageCreate', async msg => {
       return msg.reply("Session started. Just type — I'll respond. Use `?Jstop` to end it.");
     }
 
-    if (content.toLowerCase() === '?jstop') {
+    if ((content || '').toLowerCase() === '?jstop') {
       if (!chatSessions.has(userId)) return msg.reply("No active session.");
       chatSessions.delete(userId);
       console.log(`[CHAT] Session ended for ${msg.author.username}`);
@@ -747,7 +747,7 @@ client.on('messageCreate', async msg => {
     }
 
     // ── > PREFIX COMMANDS ─────────────────────────────────────────
-    if (content.startsWith(PREFIX)) {
+    if (content && content.startsWith(PREFIX)) {
       const [rawCmd, ...args] = content.slice(PREFIX.length).trim().split(/\s+/);
       const cmd = rawCmd?.toLowerCase();
       console.log(`[CMD] "${cmd}"`);
