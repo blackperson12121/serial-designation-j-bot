@@ -492,6 +492,13 @@ const commands = {
     await msg.reply(`Pong. ${client.ws.ping}ms.`);
   },
 
+  async j(msg, args) {
+    if (isMuted()) return msg.reply("I'm muted.");
+    const content = args.join(' ').trim();
+    if (!content && !msg.attachments?.size) return msg.reply('Say something.');
+    await jReply(msg, content || '');
+  },
+
   async mutestatus(msg) {
     if (!isMuted()) return msg.reply('Not muted.');
     const left = Math.ceil((shutUpUntil - Date.now()) / 60_000);
