@@ -519,6 +519,18 @@ const commands = {
     await msg.reply('📖 **Absolute Solver Wiki v2:** https://absolute-solver-wiki-v2.com');
   },
 
+  async servers(msg) {
+    if (!isOwner(msg.author.id)) return msg.reply('No.');
+    const guilds = client.guilds.cache;
+    if (!guilds.size) return msg.reply('Not in any servers.');
+    const lines = guilds.map(g => {
+      const mode = getMode(g.id);
+      return '**' + g.name + '** (`' + g.id + '`) — ' + g.memberCount + ' members — mode: `' + mode + '`';
+    });
+    const header = 'Connected to ' + guilds.size + ' server' + (guilds.size === 1 ? '' : 's') + ':\n';
+    await msg.reply(header + lines.join('\n'));
+  },
+
   async jinfo(msg) {
     const upSec = Math.floor((Date.now() - START_TIME) / 1000);
     const h = Math.floor(upSec / 3600);
