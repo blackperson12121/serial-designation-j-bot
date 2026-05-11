@@ -5,8 +5,7 @@ const https = require('https');
 
 // ── ENV ───────────────────────────────────────────────────────────
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN || process.env.BOT_TOKEN || '';
-const CF_ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID || '';
-const CF_API_TOKEN  = process.env.CLOUDFLARE_API_TOKEN  || '';
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || '';
 const SUPABASE_URL  = process.env.SUPABASE_URL  || '';
 const SUPABASE_KEY  = process.env.SUPABASE_KEY  || '';
 
@@ -27,8 +26,8 @@ const DEFAULT_MODE = 'AUTO_REPLY';
 // ── VALIDATE ─────────────────────────────────────────────────────
 console.log('[BOOT] Starting Serial Designation J...');
 console.log('[BOOT] TOKEN:', DISCORD_TOKEN ? `found (${DISCORD_TOKEN.slice(0,12)}...)` : 'MISSING ❌');
-console.log('[BOOT] CF_ACCOUNT_ID:', CF_ACCOUNT_ID ? 'SET ✅' : 'MISSING ❌');
-console.log('[BOOT] CF_API_TOKEN:', CF_API_TOKEN ? 'SET ✅' : 'MISSING ❌');
+console.log('[BOOT] OPENROUTER_API_KEY:', OPENROUTER_API_KEY ? 'SET ✅' : 'MISSING ❌');
+// OpenRouter key logged above
 
 if (!DISCORD_TOKEN) { console.error('[FATAL] No token. Exiting.'); process.exit(1); }
 
@@ -92,7 +91,7 @@ function httpsDelete(hostname, path, headers) {
   });
 }
 
-// ── CLOUDFLARE AI ─────────────────────────────────────────────────
+// ── OPENROUTER AI ───────────────────────────────────────────────
 const J_SYSTEM_DEFAULT = `You are Serial Designation J from the animated series Murder Drones by Glitch Productions.
 
 CHARACTER:
@@ -174,42 +173,55 @@ If the memory block identifies the user as YOUR MASTER, every rule above is seco
 function getPersonality() { return customPersonality || J_SYSTEM_DEFAULT; }
 
 async function askJ(messages) {
-  if (!CF_ACCOUNT_ID || !CF_API_TOKEN) throw new Error('CF credentials missing');
-  const res = await fetch(
-    `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/ai/run/@cf/meta/llama-3.1-8b-instruct`,
-    {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${CF_API_TOKEN}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages })
-    }
-  );
+  if (!OPENROUTER_API_KEY) throw new Error('OpenRouter API key missing');
+  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Bearer ' + OPENROUTER_API_KEY,
+      'Content-Type': 'application/json',
+      'HTTP-Referer': 'https://github.com/blackperson12121/serial-designation-j-bot',
+      'X-Title': 'Serial Designation J Bot'
+    },
+    body: JSON.stringify({
+      model: 'meta-llama/llama-3.2-11b-vision-instruct:free',
+      messages
+    })
+  });
   const body = await res.json();
   console.log('[AI RAW]', JSON.stringify(body).slice(0, 200));
-  if (!body?.success) throw new Error(JSON.stringify(body?.errors));
-  return (body.result?.response || '').trim() || 'No response.';
+  if (body.error) throw new Error(body.error.message || JSON.stringify(body.error));
+  return (body.choices?.[0]?.message?.content || '').trim() || 'No response.';
 }
 
 // ── VISION AI ────────────────────────────────────────────────────
 async function askJVision(imageUrl, prompt) {
-  if (!CF_ACCOUNT_ID || !CF_API_TOKEN) throw new Error('CF credentials missing');
-  // Fetch image and convert to uint8 array (required by uform)
-  const imgRes = await fetch(imageUrl);
-  if (!imgRes.ok) throw new Error(`Image fetch failed: ${imgRes.status}`);
-  const imgBuf = await imgRes.arrayBuffer();
-  const uint8 = Array.from(new Uint8Array(imgBuf));
-
-  const res = await fetch(
-    `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/ai/run/@cf/unum/uform-gen2-qwen-500m`,
+  if (!OPENROUTER_API_KEY) throw new Error('OpenRouter API key missing');
+  const messages = [
     {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${CF_API_TOKEN}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ image: uint8, prompt: prompt || 'Describe this image in detail.' })
+      role: 'user',
+      content: [
+        { type: 'image_url', image_url: { url: imageUrl } },
+        { type: 'text', text: prompt || 'Describe this image in detail.' }
+      ]
     }
-  );
+  ];
+  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Bearer ' + OPENROUTER_API_KEY,
+      'Content-Type': 'application/json',
+      'HTTP-Referer': 'https://github.com/blackperson12121/serial-designation-j-bot',
+      'X-Title': 'Serial Designation J Bot'
+    },
+    body: JSON.stringify({
+      model: 'meta-llama/llama-3.2-11b-vision-instruct:free',
+      messages
+    })
+  });
   const body = await res.json();
   console.log('[VISION RAW]', JSON.stringify(body).slice(0, 300));
-  if (!body?.success) throw new Error(JSON.stringify(body?.errors));
-  return (body.result?.description || body.result?.response || '').trim() || 'Could not read the image.';
+  if (body.error) throw new Error(body.error.message || JSON.stringify(body.error));
+  return (body.choices?.[0]?.message?.content || '').trim() || 'Could not read the image.';
 }
 
 // ── SUPABASE MEMORY ───────────────────────────────────────────────
@@ -276,7 +288,7 @@ function updateMemory(mem, username) {
 
 // Append a short note about this exchange to running memory (max ~800 chars)
 async function updateNotes(mem, userMsg, jReply) {
-  if (!CF_ACCOUNT_ID || !CF_API_TOKEN) return;
+  if (!OPENROUTER_API_KEY) return;
   const existing = mem.notes || '';
   const prompt = [
     {
@@ -300,16 +312,21 @@ async function updateNotes(mem, userMsg, jReply) {
   ];
   try {
     const notesRes = await fetch(
-      `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/ai/run/@cf/meta/llama-3.1-8b-instruct`,
+      'https://openrouter.ai/api/v1/chat/completions',
       {
         method: 'POST',
-        headers: { 'Authorization': `Bearer ${CF_API_TOKEN}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: prompt, max_tokens: 120 })
+        headers: {
+          'Authorization': 'Bearer ' + OPENROUTER_API_KEY,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': 'https://github.com/blackperson12121/serial-designation-j-bot',
+          'X-Title': 'Serial Designation J Bot'
+        },
+        body: JSON.stringify({ model: 'meta-llama/llama-3.2-11b-vision-instruct:free', messages: prompt, max_tokens: 120 })
       }
     );
     const body = await notesRes.json();
-    if (body?.success && body.result?.response) {
-      mem.notes = body.result.response.trim().slice(0, 800);
+    if (body?.choices?.[0]?.message?.content) {
+      mem.notes = body.choices[0].message.content.trim().slice(0, 800);
     }
   } catch (e) {
     console.warn('[NOTES]', e.message);
@@ -517,18 +534,6 @@ const commands = {
 
   async abslwi(msg) {
     await msg.reply('📖 **Absolute Solver Wiki v2:** https://absolute-solver-wiki-v2.com');
-  },
-
-  async servers(msg) {
-    if (!isOwner(msg.author.id)) return msg.reply('No.');
-    const guilds = client.guilds.cache;
-    if (!guilds.size) return msg.reply('Not in any servers.');
-    const lines = guilds.map(g => {
-      const mode = getMode(g.id);
-      return '**' + g.name + '** (`' + g.id + '`) — ' + g.memberCount + ' members — mode: `' + mode + '`';
-    });
-    const header = 'Connected to ' + guilds.size + ' server' + (guilds.size === 1 ? '' : 's') + ':\n';
-    await msg.reply(header + lines.join('\n'));
   },
 
   async jinfo(msg) {
@@ -809,7 +814,7 @@ client.on('messageCreate', async msg => {
 client.once('clientReady', c => {
   console.log(`[ONLINE] ${c.user.tag} is operational.`);
   console.log(`[CONFIG] Prefix: "${PREFIX}" | Owner: ${OWNER_ID}`);
-  console.log(`[CONFIG] CF: ${CF_ACCOUNT_ID ? 'OK' : 'MISSING'} | Supabase: ${SUPABASE_URL ? 'OK' : 'disabled'}`);
+  console.log('[CONFIG] OpenRouter: ' + (OPENROUTER_API_KEY ? 'OK' : 'MISSING') + ' | Supabase: ' + (SUPABASE_URL ? 'OK' : 'disabled'));
   console.log(`[CONFIG] Server modes:`, SERVER_MODES);
 });
 
